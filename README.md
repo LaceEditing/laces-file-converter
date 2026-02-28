@@ -24,24 +24,18 @@
 
 ## Features
 
-- **Batch conversion** — convert one file or hundreds at once
-- **Drag-and-drop** — drop files anywhere on the window to load them
-- **Video → Audio extraction** — pull the audio track out of any video file
-- **Real-time progress** — per-file progress bar powered by FFmpeg's `-progress` pipe
-- **Cancel mid-conversion** — stop a running batch at any time without leaving ghost processes
-- **Wide format support** — 40+ input/output formats across video, audio, and image (see [Supported Formats](#supported-formats))
-- **Quality control** — choose CRF presets for video, bitrate for audio, and quality level for images
-- **Recent folders** — quickly pick from your last 10 output directories
-- **Dark-mode UI** — modern green-on-dark theme using CustomTkinter
-- **Notification sound** — plays a chime when your conversion finishes
-- **Portable** — ships with FFmpeg; no system-wide install required
-- **Cross-platform friendly** — primarily developed for Windows, also runs on macOS/Linux with minimal changes
-
----
-
-## Screenshots
-
-> *Screenshots coming soon — contributions welcome!*
+- **Batch conversion**, convert one file or hundreds at once
+- **Drag-and-drop**, drop files anywhere on the window to load them
+- **Video → Audio extraction**, pull the audio track out of any video file
+- **Real-time progress**, per-file progress bar powered by FFmpeg's `-progress` pipe
+- **Cancel mid-conversion**, stop a running batch at any time without leaving ghost processes
+- **Wide format support**, 40+ input/output formats across video, audio, and image (see [Supported Formats](#supported-formats))
+- **Quality control**, choose CRF presets for video, bitrate for audio, and quality level for images
+- **Recent folders**, quickly pick from your last 10 output directories
+- **Dark-mode UI**, modern green-on-dark theme using CustomTkinter
+- **Notification sound**, plays a chime when your conversion finishes
+- **Portable**, ships with FFmpeg; no system-wide install required
+- **Cross-platform friendly**, primarily developed for Windows, also runs on macOS/Linux with minimal changes
 
 ---
 
@@ -96,7 +90,7 @@ The converter **requires** FFmpeg to function. If FFmpeg is not found the app wi
 
 ### 1. Select Files
 
-Click **Browse for Files** or **drag-and-drop** files anywhere on the application window. You can select multiple files — they will all be converted in one batch.
+Click **Browse for Files** or **drag-and-drop** files anywhere on the application window. You can select multiple files, they will all be converted in one batch.
 
 > **Note:** All files in a batch must be the same type (video, audio, or image). Video and audio files *can* be mixed together.
 
@@ -112,7 +106,7 @@ Set the destination folder for converted files. The **Recent…** dropdown remem
 
 ### 4. Convert
 
-Click **START CONVERSION**. The progress bar updates in real time. Click **CANCEL** at any time to abort — partial output files are cleaned up automatically.
+Click **START CONVERSION**. The progress bar updates in real time. Click **CANCEL** at any time to abort, partial output files are cleaned up automatically.
 
 When the batch finishes, a notification sound plays and you're offered a shortcut to open the output folder.
 
@@ -214,7 +208,7 @@ Contributions are welcome! Here's how to get involved:
 
 ### Guidelines
 
-- Keep changes focused — one feature or fix per PR
+- Keep changes focused, one feature or fix per PR
 - Follow the existing code style (PEP 8, type hints, docstrings)
 - Test your changes on at least one platform before submitting
 - If adding a new format, make sure FFmpeg supports it out of the box
@@ -231,7 +225,7 @@ Open an [issue](https://github.com/LaceEditing/laces-file-converter/issues) with
 
 ## License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **MIT License**, see the [LICENSE](LICENSE) file for details.
 
 You are free to use, modify, and distribute this software for any purpose, including commercial use.
 
