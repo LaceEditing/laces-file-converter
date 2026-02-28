@@ -1,10 +1,6 @@
 # Lace's Total File Converter
 
 <p align="center">
-  <img src="assets/icons/icon2.png" alt="Lace's Total File Converter" width="128" />
-</p>
-
-<p align="center">
   <strong>A free, open-source batch file converter for video, audio, and images.</strong><br>
   Built with Python, CustomTkinter, and FFmpeg.
 </p>
