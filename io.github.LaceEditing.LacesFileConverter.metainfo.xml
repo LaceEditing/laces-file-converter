@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.LaceEditing.LacesFileConverter</id>
+
+  <name>Lace's Total File Converter</name>
+  <summary>Batch convert video, audio, and image files</summary>
+
+  <developer id="io.github.laceediting">
+    <name>LaceEditing</name>
+  </developer>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      Lace's Total File Converter is a batch file converter for video, audio,
+      and image files powered by FFmpeg. It features a modern dark-mode GUI with
+      drag-and-drop support, real-time conversion progress, quality and bitrate
+      controls, and the ability to extract audio from video files.
+    </p>
+    <p>Supported features include:</p>
+    <ul>
+      <li>Batch conversion of multiple files at once</li>
+      <li>Drag-and-drop file loading</li>
+      <li>Real-time progress tracking via FFmpeg</li>
+      <li>Video quality presets (CRF-based)</li>
+      <li>Audio bitrate control</li>
+      <li>Image quality levels</li>
+      <li>Extract audio tracks from video files</li>
+      <li>Cancel conversions mid-process with cleanup</li>
+      <li>Recent output folder history</li>
+    </ul>
+    <p>
+      Supports 13 video formats, 9 audio formats, and 13 image input formats
+      with a wide range of output options.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.LaceEditing.LacesFileConverter.desktop</launchable>
+
+  <url type="homepage">https://github.com/LaceEditing/laces-file-converter</url>
+  <url type="bugtracker">https://github.com/LaceEditing/laces-file-converter/issues</url>
+  <url type="vcs-browser">https://github.com/LaceEditing/laces-file-converter</url>
+
+  <branding>
+    <color type="primary" scheme_preference="dark">#0d1f17</color>
+    <color type="primary" scheme_preference="light">#2e8b57</color>
+  </branding>
+
+  <content_rating type="oars-1.1" />
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+    <category>Audio</category>
+    <category>Graphics</category>
+    <category>Utility</category>
+  </categories>
+
+  <releases>
+    <release version="4.0.0" date="2025-01-01">
+      <description>
+        <p>Major release with modernized UI, batch conversion support, drag-and-drop, real-time progress tracking, and image format support.</p>
+      </description>
+    </release>
+  </releases>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Main converter window with dark theme</caption>
+      <image>https://raw.githubusercontent.com/LaceEditing/laces-file-converter/main/screenshots/main-window.png</image>
+    </screenshot>
+  </screenshots>
+
+</component>

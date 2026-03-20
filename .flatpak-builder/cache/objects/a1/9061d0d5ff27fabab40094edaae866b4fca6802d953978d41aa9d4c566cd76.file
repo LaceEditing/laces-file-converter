@@ -1,0 +1,5 @@
+[Runtime]
+name=io.github.LaceEditing.LacesFileConverter.Debug
+
+[ExtensionOf]
+ref=app/io.github.LaceEditing.LacesFileConverter/x86_64/master

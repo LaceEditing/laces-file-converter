@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Lace's Total File Converter
+GenericName=File Converter
+Comment=Batch convert video, audio, and image files using FFmpeg
+Exec=laces-file-converter
+Icon=io.github.LaceEditing.LacesFileConverter
+Terminal=false
+Categories=AudioVideo;Video;Audio;Graphics;Utility;
+Keywords=convert;video;audio;image;ffmpeg;batch;
+MimeType=video/mp4;video/x-msvideo;video/x-matroska;video/quicktime;video/x-ms-wmv;video/x-flv;video/webm;video/x-m4v;video/mpeg;video/3gpp;video/mp2t;video/ogg;audio/mpeg;audio/x-wav;audio/flac;audio/x-m4a;audio/aac;audio/ogg;audio/opus;audio/x-ms-wma;audio/x-aiff;image/jpeg;image/png;image/bmp;image/gif;image/webp;image/tiff;image/svg+xml;image/x-icon;image/avif;image/heic;image/heif;
+StartupWMClass=laces-file-converter

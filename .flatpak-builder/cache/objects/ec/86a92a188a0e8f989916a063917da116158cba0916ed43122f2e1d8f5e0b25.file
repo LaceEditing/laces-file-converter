@@ -1,0 +1,24 @@
+[Application]
+name=io.github.LaceEditing.LacesFileConverter
+runtime=org.freedesktop.Platform/x86_64/24.08
+sdk=org.freedesktop.Sdk/x86_64/24.08
+command=laces-file-converter
+
+[Context]
+shared=ipc;
+sockets=x11;pulseaudio;fallback-x11;
+devices=dri;
+filesystems=home;
+
+[Extension org.freedesktop.Platform.ffmpeg-full]
+directory=lib/ffmpeg
+add-ld-path=.
+version=24.08
+
+[Extension io.github.LaceEditing.LacesFileConverter.Debug]
+directory=lib/debug
+autodelete=true
+no-autodownload=true
+
+[Build]
+built-extensions=io.github.LaceEditing.LacesFileConverter.Debug;

@@ -1,0 +1,160 @@
+app-id: io.github.LaceEditing.LacesFileConverter
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: laces-file-converter
+
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --filesystem=home
+  - --device=dri
+
+add-extensions:
+  org.freedesktop.Platform.ffmpeg-full:
+    directory: lib/ffmpeg
+    add-ld-path: .
+    version: '24.08'
+    autodownload: true
+    autodelete: false
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+
+modules:
+  # ── Create mount point for FFmpeg extension ──────────────────────────
+  - name: ffmpeg-extension
+    buildsystem: simple
+    build-commands:
+      - mkdir -p ${FLATPAK_DEST}/lib/ffmpeg
+
+  # ── Tcl 8.6.16 ──────────────────────────────────────────────────────
+  - name: tcl
+    buildsystem: autotools
+    subdir: unix
+    config-opts:
+      - --enable-threads
+    post-install:
+      - chmod 755 ${FLATPAK_DEST}/lib/libtcl*.so
+      - make install-private-headers
+    sources:
+      - type: archive
+        url: https://prdownloads.sourceforge.net/tcl/tcl8.6.16-src.tar.gz
+        sha256: 91cb8fa61771c63c262efb553059b7c7ad6757afa5857af6265e4b0bdc2a14a5
+
+  # ── Tk 8.6.16 ───────────────────────────────────────────────────────
+  - name: tk
+    buildsystem: autotools
+    subdir: unix
+    config-opts:
+      - --enable-threads
+      - --with-tcl=/app/lib
+    post-install:
+      - chmod 755 ${FLATPAK_DEST}/lib/libtk*.so
+      - make install-private-headers
+    sources:
+      - type: archive
+        url: https://prdownloads.sourceforge.net/tcl/tk8.6.16-src.tar.gz
+        sha256: be9f94d3575d4b3099d84bc3c10de8994df2d7aa405208173c709cc404a7e5fe
+
+  # ── tkdnd 2.9.4 (native drag-and-drop for Tk) ───────────────────────
+  - name: tkdnd
+    buildsystem: autotools
+    config-opts:
+      - --with-tcl=/app/lib
+      - --with-tk=/app/lib
+    post-install:
+      - mv ${FLATPAK_DEST}/lib/tkdnd* ${FLATPAK_DEST}/lib/tcl8.6/ || true
+    sources:
+      - type: archive
+        url: https://github.com/petasis/tkdnd/archive/refs/tags/tkdnd-release-test-v2.9.4.tar.gz
+        sha256: cc6d3f0b7daca9564869e29e5db0996caa5f0c03d21c9b7032bad43f0a58121c
+
+  # ── Python _tkinter module ──────────────────────────────────────────
+  - name: python3-tkinter
+    buildsystem: simple
+    build-commands:
+      - |
+        PYVER=$(python3 -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}')")
+        SUFFIX=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+        export CPPFLAGS="-I/app/include"
+        export LDFLAGS="-L/app/lib"
+        ./configure --prefix=/app \
+          --enable-shared \
+          --with-tcltk-includes="-I/app/include" \
+          --with-tcltk-libs="-L/app/lib -ltcl8.6 -ltk8.6" \
+          --without-ensurepip
+        make -j$(nproc) sharedmods
+        install -Dm755 "build/lib.linux-x86_64-${PYVER}/_tkinter${SUFFIX}" \
+          "/app/lib/python${PYVER}/site-packages/_tkinter${SUFFIX}"
+    sources:
+      - type: archive
+        url: https://www.python.org/ftp/python/3.12.12/Python-3.12.12.tar.xz
+        sha256: fb85a13414b028c49ba18bbd523c2d055a30b56b18b92ce454ea2c51edc656c4
+
+  # ── Python pip dependencies (customtkinter, tkinterdnd2, pygame-ce) ─
+  - name: python3-customtkinter
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} customtkinter
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/f2/f2/728f041460f1b9739b85ee23b45fa5a505962ea11fd85bdbe2a02b021373/darkdetect-0.8.0-py3-none-any.whl
+        sha256: a7509ccf517eaad92b31c214f593dbcf138ea8a43b2935406bbd565e15527a85
+      - type: file
+        url: https://files.pythonhosted.org/packages/b7/b9/c538f279a4e237a006a2c98387d081e9eb060d203d8ed34467cc0f0b9b53/packaging-26.0-py3-none-any.whl
+        sha256: b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529
+      - type: file
+        url: https://files.pythonhosted.org/packages/3b/b1/b43b33001a77256b335511e75f257d001082350b8506c8807f30c98db052/customtkinter-5.2.2-py3-none-any.whl
+        sha256: 14ad3e7cd3cb3b9eb642b9d4e8711ae80d3f79fb82545ad11258eeffb2e6b37c
+
+  - name: python3-tkinterdnd2
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} tkinterdnd2
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/08/c3/e04f004a53c00dc01126b6f998264cef672c6883c36aa4bd65845a8eb4c0/tkinterdnd2-0.4.3-py3-none-any.whl
+        sha256: 8804f5d2e2a99713ec93e85384397fec6bf66fdf2065e3750938d55018971c4a
+
+  - name: python3-pygame-ce
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index --find-links="file://${PWD}"
+        --prefix=${FLATPAK_DEST} pygame-ce
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/db/17/70ada4cef84eca48a995cc9e0f2f087e6190b3e4111e9c8ec3c7a8f689bd/pygame_ce-2.5.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+        sha256: 0d8fa8822c0f4b5ae6b44ada7be9f2193fd512da1381c37fa3c5bda8971d64cb
+
+  # ── Lace's Total File Converter ─────────────────────────────────────
+  - name: laces-file-converter
+    buildsystem: simple
+    build-commands:
+      # Install application
+      - install -Dm755 main.py ${FLATPAK_DEST}/share/laces-file-converter/main.py
+      - cp -r assets ${FLATPAK_DEST}/share/laces-file-converter/assets
+
+      # Install launcher
+      - install -Dm755 laces-file-converter.sh ${FLATPAK_DEST}/bin/laces-file-converter
+
+      # Install desktop file
+      - install -Dm644 io.github.LaceEditing.LacesFileConverter.desktop ${FLATPAK_DEST}/share/applications/io.github.LaceEditing.LacesFileConverter.desktop
+
+      # Install metainfo
+      - install -Dm644 io.github.LaceEditing.LacesFileConverter.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.LaceEditing.LacesFileConverter.metainfo.xml
+
+      # Install icons (multiple sizes for HiDPI support)
+      - install -Dm644 assets/icons/icon2.png ${FLATPAK_DEST}/share/icons/hicolor/32x32/apps/io.github.LaceEditing.LacesFileConverter.png
+      - install -Dm644 assets/icons/icon2_64.png ${FLATPAK_DEST}/share/icons/hicolor/64x64/apps/io.github.LaceEditing.LacesFileConverter.png
+      - install -Dm644 assets/icons/icon2_128.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.LaceEditing.LacesFileConverter.png
+
+    sources:
+      - type: dir
+        path: .
