@@ -1,3 +1,4 @@
-customtkinter>=5.2.0
-tkinterdnd2>=0.4.0
-pygame-ce>=2.4.0
+customtkinter==5.2.2
+tkinterdnd2>=0.4.3,<0.5
+pygame-ce>=2.5.7,<3
+Pillow>=10,<13

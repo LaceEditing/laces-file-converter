@@ -23,62 +23,78 @@
 - **Batch conversion**, convert one file or hundreds at once
 - **Drag-and-drop**, drop files anywhere on the window to load them
 - **Video → Audio extraction**, pull the audio track out of any video file
-- **Real-time progress**, per-file progress bar powered by FFmpeg's `-progress` pipe
+- **Live conversion details**, current-file percentage, batch progress, elapsed time, estimated file time remaining, encoding speed, FPS, and output size
+- **Independent speed and quality**, fast encoding by default, with balanced and smaller-file settings
+- **Copy streams mode**, change compatible video/audio containers without re-encoding
 - **Cancel mid-conversion**, stop a running batch at any time without leaving ghost processes
 - **Wide format support**, 40+ input/output formats across video, audio, and image (see [Supported Formats](#supported-formats))
 - **Quality control**, choose CRF presets for video, bitrate for audio, and quality level for images
 - **Recent folders**, quickly pick from your last 10 output directories
-- **Dark-mode UI**, modern green-on-dark theme using CustomTkinter
+- **Linux-friendly UI**, the original Bubblegum Sans logo, centered controls, standard system fonts for text, matching text/control scaling, and an automatically hidden scrollbar
+- **Always-visible progress**, conversion status and Cancel stay on screen when setup needs scrolling
 - **Notification sound**, plays a chime when your conversion finishes
-- **Portable**, ships with FFmpeg; no system-wide install required
-- **Cross-platform friendly**, primarily developed for Windows, also runs on macOS/Linux with minimal changes
+- **Native Linux installation**, isolated Python environment, application-menu entry, file-manager integration, upgrades, and uninstall
+- **Cross-platform**, Python interface for Linux, Windows, and macOS; FFmpeg is installed separately
 
 ---
 
 ## Installation
 
-### Prerequisites
+### Linux (recommended)
 
-| Dependency | Version | Notes |
-|---|---|---|
-| **Python** | 3.10+ | 3.12 or 3.13 recommended |
-| **FFmpeg** | 5.0+ | Must be on `PATH` or placed next to `main.py` |
+Download/extract the native installer archive, or clone this repository. The installer works with Python 3.10+ and uses your distribution's FFmpeg and Tk 8.6 packages. On Wayland, Tk also needs XWayland (usually installed by your desktop). The app reads your Xft DPI setting through `xrdb` when available and scales text, controls, and window size together. This affects only the converter, not your desktop settings.
 
-### Quick Start
+Install system dependencies once:
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/LaceEditing/laces-file-converter.git
-cd laces-file-converter
+# Garuda / Arch
+sudo pacman -S --needed python tk ffmpeg
 
-# 2. Create and activate a virtual environment (recommended)
+# Ubuntu / Debian / Linux Mint
+sudo apt update
+sudo apt install python3 python3-venv python3-tk ffmpeg
+```
+
+Then, from the extracted/cloned folder, run **without sudo**:
+
+```bash
+./install-linux.sh
+```
+
+Open **Lace's Total File Converter** from the application menu, or run:
+
+```bash
+~/.local/bin/laces-file-converter
+```
+
+Installation downloads Python packages from PyPI into a private virtual environment. It copies the application into `~/.local/share/laces-file-converter`; the checkout or extracted installer can be moved/deleted afterward. No system Python packages are changed. The menu entry accepts files through your file manager's **Open With** action.
+
+- **Upgrade:** update/extract the new source and rerun `./install-linux.sh`. The previous release remains available on disk; a failed dependency installation leaves the active release intact. Close a running app before upgrading.
+- **Uninstall:** `./install-linux.sh --uninstall`. Converted files and settings are kept. Extract another copy of the installer if you deleted the original.
+- **Custom prefix:** `./install-linux.sh --prefix /path/to/prefix`; supply the same prefix to uninstall. Only the standard `~/.local` location is normally searched by desktop menus automatically.
+- **Diagnostics:** `~/.local/bin/laces-file-converter --check` checks Python, Tk, optional integrations, FFmpeg, and ffprobe without opening a window.
+- **Settings:** `${XDG_CONFIG_HOME:-~/.config}/laces-file-converter/config.json`. Existing `~/.lace_converter_config.json` history is read automatically when no new settings exist.
+
+For other distributions, install Python, Python's venv/ensurepip support, Tk bindings, FFmpeg, and ffprobe through your package manager. Codec availability varies by FFmpeg build; a missing encoder is reported in **View details**. Drag-and-drop and completion sound are optional at runtime; failures in these integrations no longer prevent the app from starting.
+
+**Existing Flatpak users:** use the native installer for this release. The checked-in `LacesFileConverter.flatpak` is an older 4.0.0 build and does not contain these fixes. The legacy Flatpak recipe is not a verified release path: it expects an FFmpeg executable, but its codec extension does not supply the command-line tools. The native menu entry takes precedence over the old Flatpak entry without removing the old installation.
+
+### Windows / macOS / running from source
+
+Install Python 3.10+ with Tk, then:
+
+```bash
 python -m venv .venv
-# Windows
+# Windows:
 .venv\Scripts\activate
-# macOS / Linux
+# macOS / Linux:
 source .venv/bin/activate
 
-# 3. Install Python dependencies
-pip install -r requirements.txt
-
-# 4. Place ffmpeg
-#    Option A: Download from https://ffmpeg.org/download.html and put
-#              ffmpeg.exe (and ffprobe.exe) in this folder.
-#    Option B: Install system-wide so it's on your PATH.
-
-# 5. Run the app
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-### FFmpeg
-
-The converter **requires** FFmpeg to function. If FFmpeg is not found the app will show an error dialog on startup.
-
-| Platform | Easiest method |
-|---|---|
-| **Windows** | Download a [release build](https://www.gyan.dev/ffmpeg/builds/), extract `ffmpeg.exe` + `ffprobe.exe` into the project folder |
-| **macOS** | `brew install ffmpeg` |
-| **Linux** | `sudo apt install ffmpeg` (Debian/Ubuntu) or your distro's package manager |
+FFmpeg **and ffprobe** must be on `PATH`, or placed next to `main.py` (Windows: `ffmpeg.exe` and `ffprobe.exe`). You can also set `FFMPEG_BINARY` and `FFPROBE_BINARY` to their full paths. On macOS, install FFmpeg with `brew install ffmpeg` and use a Python build with Tk. If ffprobe is unavailable at runtime, conversion still works with an activity indicator and elapsed time instead of percentage/ETA.
 
 ---
 
@@ -88,11 +104,12 @@ The converter **requires** FFmpeg to function. If FFmpeg is not found the app wi
 
 Click **Browse for Files** or **drag-and-drop** files anywhere on the application window. You can select multiple files, they will all be converted in one batch.
 
-> **Note:** All files in a batch must be the same type (video, audio, or image). Video and audio files *can* be mixed together.
+> **Note:** All files in a batch must be the same type (video, audio, or image). Video and audio files *can* be mixed together when an audio output format is selected.
 
 ### 2. Choose Quality & Output Format
 
-- **Video:** choose a quality preset (High / Medium / Low) and an output container. You can also pick an audio format from the dropdown to **extract audio only**.
+- **Video:** choose quality (High / Medium / Low), encoding speed, and an output container. **Fast** is the default. Balanced / Smaller files spend more encoding time on compression. Speed applies to H.264 and WebM outputs; other codecs use their own settings. Pick an audio format to **extract audio only**, with a selectable bitrate.
+- **Copy streams:** for video/audio, choose this mode when you only need a compatible container change. It preserves compressed streams and skips encoding. Quality/bitrate controls are disabled. All video/audio tracks are kept for video outputs; audio extraction keeps the first audio track. Subtitles, attachments, and data tracks are not copied. Incompatible codec/container pairs fail with an explanation; choose **Convert** to re-encode them.
 - **Audio:** choose a bitrate and output format.
 - **Image:** choose a quality level and output format (including `.ico` and `.avif`).
 
@@ -102,9 +119,13 @@ Set the destination folder for converted files. The **Recent…** dropdown remem
 
 ### 4. Convert
 
-Click **START CONVERSION**. The progress bar updates in real time. Click **CANCEL** at any time to abort, partial output files are cleaned up automatically.
+Click **Start conversion**. The current-file bar shows media-time progress; the batch bar counts files with a fractional contribution from the current file (it is not an estimate of total batch time). Live details show elapsed batch time, estimated time remaining for the current file, processing speed (`2×` means two seconds of media per second), FPS when available, and bytes written.
 
-When the batch finishes, a notification sound plays and you're offered a shortcut to open the output folder.
+Estimates settle as encoding proceeds and may change with scene complexity or disk speed. Files with unknown duration, including still images, show an activity indicator and elapsed time. **Finalizing** covers flushing/indexing the output; a file is marked complete only after FFmpeg exits successfully. The completion notification reports successful and failed files accurately; **View details** shows output paths or FFmpeg's error messages. **Open output folder** opens the destination.
+
+Click **Cancel** or close the window to stop the current job. The app waits for FFmpeg to exit (and kills it if needed), removes its temporary partial file, and keeps already completed files. Inputs and existing outputs are never overwritten. Settings and file selection are held fixed while a batch runs.
+
+FFmpeg must include the codec/decoder needed by your chosen format. HEIC/HEIF, SVG, AVIF, and animation support depend on the installed FFmpeg build. Still-image targets use the first frame of animated inputs; GIF/WebP retain multiple frames when supported.
 
 ---
 
@@ -141,26 +162,42 @@ When video files are loaded, the output format dropdown also includes every audi
 
 ```
 laces-file-converter/
-├── main.py                  # Application entry point (single-file app)
-├── requirements.txt         # Python dependencies
-├── LICENSE                  # MIT license
-├── README.md                # This file
-├── ffmpeg.exe               # (user-provided) FFmpeg binary
-├── ffprobe.exe              # (user-provided) FFprobe binary
-└── assets/
-    ├── fonts/
-    │   ├── BubblegumSans-Regular.ttf   # Title font
-    │   └── Bartino.ttf                 # UI label font
-    ├── icons/
-    │   ├── icon2.ico                   # Window icon (ICO)
-    │   └── icon2.png                   # Window icon (PNG fallback)
-    └── sounds/
-        └── notification.mp3            # Completion chime
+├── main.py                  # Tk interface and main-thread progress updates
+├── converter.py             # FFmpeg commands, process control, progress, safe output
+├── linux_support.py         # Startup diagnostics and configuration paths
+├── ui_components.py         # Linux DPI alignment and automatically hidden scrolling
+├── install-linux.sh         # Native Linux installer entry point
+├── scripts/
+│   ├── install_linux.py     # User install, upgrades, desktop entry, uninstall
+│   └── build_linux.py       # Build the distributable Linux installer archive
+├── tests/                   # Process, progress, real FFmpeg, and GUI smoke checks
+├── requirements.txt
+└── assets/                  # Fonts, icon, notification sound
 ```
 
 ---
 
 ## Building from Source
+
+### Native Linux installer archive
+
+```bash
+python3 scripts/build_linux.py
+```
+
+This creates `dist/laces-file-converter-4.1.2-linux.tar.gz`, including the installer and application assets. Python dependencies are downloaded during installation; this is not an offline bundle.
+
+### Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+# With GUI dependencies installed and an X11/XWayland display:
+.venv/bin/python tests/gui_smoke.py
+.venv/bin/python tests/gui_layout.py
+```
+
+The integration tests generate synthetic media, convert all advertised output formats, probe and decode the results, and verify stream copying. Other tests cover stderr pipe saturation, silent/hung child cancellation, probe cancellation, unknown duration, invalid progress, failure cleanup, and filename collisions. No personal media is used.
+
 
 ### PyInstaller (single `.exe`)
 
@@ -187,8 +224,11 @@ The resulting executable will be in the `dist/` folder.
 | [customtkinter](https://github.com/TomSchimansky/CustomTkinter) | Modern themed Tkinter widgets |
 | [tkinterdnd2](https://github.com/pmgagne/tkinterdnd2) | Native drag-and-drop support |
 | [pygame-ce](https://github.com/pygame-community/pygame-ce) | Audio playback for notification sounds |
+| [Pillow](https://python-pillow.github.io/) | Linux window/menu icon support |
 
 All listed in [`requirements.txt`](requirements.txt).
+
+Implementation references: [FFmpeg progress output](https://ffmpeg.org/ffmpeg.html#Main-options), [FFmpeg encoder options](https://ffmpeg.org/ffmpeg-codecs.html), [Arch Tk package](https://archlinux.org/packages/extra/x86_64/tk/).
 
 ---
 

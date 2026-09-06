@@ -46,3 +46,10 @@ desktop.ini
 # ── Logs / temp ───────────────────────────────────────────────────────────────
 *.log
 *.tmp
+
+# Local Linux package/build artifacts
+.flatpak-builder/
+repo/
+*.flatpak
+*.tar.gz
+.pytest_cache/

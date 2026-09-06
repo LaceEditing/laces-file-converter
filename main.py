@@ -12,27 +12,58 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import shutil
+import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
-from tkinter import filedialog, messagebox
 
-import customtkinter as ctk
-import tkinterdnd2 as tkdnd
-from pygame import mixer
+from converter import Converter, Progress, Settings, find_binary, format_time
+from linux_support import check_environment, config_path
+
+VERSION = "4.1.2"
+if __name__ == "__main__" and "--check" in sys.argv:
+    sys.exit(check_environment())
+if __name__ == "__main__" and "--version" in sys.argv:
+    print(f"Lace's Total File Converter {VERSION}")
+    sys.exit(0)
+
+try:
+    from tkinter import filedialog, messagebox
+    from tkinter import font as tkfont
+    import customtkinter as ctk
+except ImportError:
+    check_environment()
+    sys.exit(1)
+
+from ui_components import AutoHideScrollableFrame, configure_linux_display, load_logo_font
+
+if sys.platform == "linux":
+    # Font-based corner glyphs can be substituted or mis-sized by Fontconfig.
+    # Drawing shapes directly also works before a newly installed font is cached.
+    from customtkinter.windows.widgets.core_rendering import DrawEngine
+    DrawEngine.preferred_drawing_method = "polygon_shapes"
+
+try:
+    import tkinterdnd2 as tkdnd
+except ImportError:
+    tkdnd = None
+try:
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    from pygame import mixer
+except ImportError:
+    mixer = None
 
 
-class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
+class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object):
     """Main application window for Lace's Total File Converter.
 
     Inherits from both :class:`customtkinter.CTk` (modern themed Tk root) and
     :class:`tkinterdnd2.TkinterDnD.DnDWrapper` (whole-window drag-and-drop).
     """
 
-    CURRENT_VERSION = "4.0.0"
+    CURRENT_VERSION = VERSION
     GITHUB_REPO = "LaceEditing/laces-file-converter"
 
     # ── Supported extensions ─────────────────────────────────────────────
@@ -77,12 +108,20 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
     # ─────────────────────────────────────────────────────────────────────
     def __init__(self) -> None:
         """Initialise the converter window, state, and UI widgets."""
-        ctk.CTk.__init__(self)
-        self.TkdndVersion = tkdnd.TkinterDnD._require(self)
+        load_logo_font(os.path.join(self._base_path(), "assets", "fonts", "BubblegumSans-Regular.ttf"))
+        ctk.CTk.__init__(self, className="laces-file-converter")
+        self.display_scale = configure_linux_display(self) if sys.platform == "linux" else 1.0
+        self.dnd_available = False
+        if tkdnd:
+            try:
+                self.TkdndVersion = tkdnd.TkinterDnD._require(self)
+                self.dnd_available = True
+            except Exception as exc:
+                print(f"Drag-and-drop unavailable; use Browse for Files: {exc}", file=sys.stderr)
 
-        self.title(f"Hey besties let's convert those files! (v{self.CURRENT_VERSION})")
-        self.geometry("950x780")
-        self.minsize(900, 720)
+        self.title(f"Lace's Total File Converter · v{self.CURRENT_VERSION}")
+        self.geometry("920x800")
+        self.minsize(760, 620)
 
         self.set_icon()
 
@@ -98,6 +137,8 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
 
         # ── State variables ──────────────────────────────────────────────
         self.video_quality = ctk.StringVar(value="High")
+        self.encoding_speed = ctk.StringVar(value="Fast")
+        self.conversion_mode = ctk.StringVar(value="Convert")
         self.audio_bitrate = ctk.StringVar(value="320 kbps")
         self.image_quality = ctk.StringVar(value="95")
         self.video_output_format = ctk.StringVar(value="mp4")
@@ -106,18 +147,29 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
         self.output_folder = ctk.StringVar(value=str(Path.home() / "Downloads"))
         self.input_files: list[str] = []
         self.is_converting: bool = False
-        self.cancel_requested: bool = False
-        self.current_process: subprocess.Popen | None = None
+        self.cancel_event = threading.Event()
+        self.ui_events = queue.SimpleQueue()
+        self.worker = None
+        self.closing = False
+        self.batch_started = 0.0
+        self.batch_output = ""
+        self.details = []
+        self.indeterminate = False
         self.current_file_type: str | None = None
         self.ffmpeg_available: bool = self.check_ffmpeg()
         self.recent_folders: list[str] = self.load_recent_folders()
 
-        self.load_custom_fonts()
         self.setup_ui()
 
         # Whole-window drag-and-drop
-        self.drop_target_register(tkdnd.DND_FILES)
-        self.dnd_bind('<<Drop>>', self.on_drop)
+        if self.dnd_available:
+            self.drop_target_register(tkdnd.DND_FILES)
+            self.dnd_bind('<<Drop>>', self.on_drop)
+        else:
+            self.status_label.configure(text="Ready. Use Browse for Files (drag-and-drop unavailable).")
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.after(100, self._poll_events)
 
         if not self.ffmpeg_available:
             self.after(500, self.show_ffmpeg_warning)
@@ -142,25 +194,14 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
         """Set the window icon from *assets/icons/*."""
         try:
             bp = self._base_path()
-            for name in ('icon2.ico', 'icon2.png'):
-                p = os.path.join(bp, 'assets', 'icons', name)
-                if os.path.exists(p):
-                    self.iconbitmap(p)
-                    return
+            if sys.platform == "win32":
+                self.iconbitmap(os.path.join(bp, "assets", "icons", "icon2.ico"))
+            else:
+                from PIL import Image, ImageTk
+                self._window_icon = ImageTk.PhotoImage(Image.open(os.path.join(bp, "assets", "icons", "icon2.ico")))
+                self.iconphoto(True, self._window_icon)
         except Exception:
             pass
-
-    def load_custom_fonts(self) -> None:
-        """Detect whether the bundled custom fonts exist on disk."""
-        try:
-            bp = self._base_path()
-            self.bubblegum_font_path = os.path.join(bp, 'assets', 'fonts', 'BubblegumSans-Regular.ttf')
-            self.bartino_font_path = os.path.join(bp, 'assets', 'fonts', 'Bartino.ttf')
-            self.has_bubblegum = os.path.exists(self.bubblegum_font_path)
-            self.has_bartino = os.path.exists(self.bartino_font_path)
-        except Exception:
-            self.has_bubblegum = False
-            self.has_bartino = False
 
     def play_notification_sound(self) -> None:
         """Play *assets/sounds/notification.mp3* through pygame mixer."""
@@ -178,7 +219,9 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
     def load_recent_folders(self) -> list[str]:
         """Load the most-recently-used output folders from the user config."""
         try:
-            cfg = Path.home() / '.lace_converter_config.json'
+            cfg = config_path()
+            if not cfg.exists():
+                cfg = Path.home() / '.lace_converter_config.json'
             if cfg.exists():
                 with open(cfg, 'r', encoding='utf-8') as f:
                     return json.load(f).get('recent_folders', [])
@@ -187,9 +230,10 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
         return []
 
     def save_recent_folders(self) -> None:
-        """Persist the recent-folders list to *~/.lace_converter_config.json*."""
+        """Persist recent folders in the platform's user configuration directory."""
         try:
-            cfg = Path.home() / '.lace_converter_config.json'
+            cfg = config_path()
+            cfg.parent.mkdir(parents=True, exist_ok=True)
             with open(cfg, 'w', encoding='utf-8') as f:
                 json.dump({'recent_folders': self.recent_folders}, f)
         except Exception:
@@ -210,38 +254,21 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
     def check_ffmpeg(self) -> bool:
         """Return *True* if a usable ``ffmpeg`` binary can be found.
 
-        Searches next to the application first, then falls back to the
-        system PATH.  When found locally the path is stored in the
-        ``FFMPEG_BINARY`` environment variable for later use.
+        Checks environment overrides, native bundled binaries, and system PATH.
         """
-        bp = self._base_path()
-        candidates = [
-            os.path.join(bp, 'ffmpeg.exe'),
-            os.path.join(bp, 'ffmpeg', 'ffmpeg.exe'),
-            os.path.join(bp, 'bin', 'ffmpeg.exe'),
-            os.path.join(bp, 'ffmpeg'),
-            os.path.join(bp, 'ffmpeg', 'ffmpeg'),
-            os.path.join(bp, 'bin', 'ffmpeg'),
-        ]
-        for p in candidates:
-            if os.path.isfile(p) and os.access(p, os.X_OK):
-                os.environ['FFMPEG_BINARY'] = p
-                return True
-        if shutil.which('ffmpeg'):
-            return True
-        return False
+        self.ffmpeg_binary = find_binary("ffmpeg", self._base_path())
+        self.ffprobe_binary = find_binary("ffprobe", self._base_path())
+        if not self.ffprobe_binary and self.ffmpeg_binary:
+            self.ffprobe_binary = find_binary("ffprobe", str(Path(self.ffmpeg_binary).parent))
+        return self.ffmpeg_binary is not None
 
     def show_ffmpeg_warning(self) -> None:
-        """Show an error dialog when FFmpeg is not available."""
         messagebox.showerror("FFmpeg Required", (
-            "FFmpeg Not Found!\n\n"
-            "FFmpeg is REQUIRED for file conversion.\n"
-            "This app cannot function without it.\n\n"
-            "To add FFmpeg:\n"
-            "1. Download ffmpeg from https://ffmpeg.org/download.html\n"
-            "2. Place ffmpeg.exe in the same folder as this app\n"
-            "   OR install it system-wide\n\n"
-            "Then restart the app!"
+            "FFmpeg was not found. Install FFmpeg and ffprobe, then restart the app.\n\n"
+            "Garuda / Arch: sudo pacman -S --needed ffmpeg\n"
+            "Ubuntu / Debian: sudo apt install ffmpeg\n\n"
+            "Windows: place ffmpeg.exe and ffprobe.exe next to main.py.\n"
+            "Run the launcher with --check for dependency diagnostics."
         ))
 
     # ─────────────────────────────────────────────────────────────────────
@@ -264,11 +291,12 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
         self.add_files(files)
 
     def add_files(self, files: list[str] | tuple[str, ...]) -> None:
+        if self.is_converting:
+            return
         valid_files = []
         file_types = set()
 
         for f in files:
-            f = f.strip('{}')
             if os.path.isfile(f):
                 ft = self.detect_file_type(f)
                 if ft:
@@ -295,7 +323,7 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
         self.current_file_type = main_type
 
         if len(valid_files) == 1:
-            display = Path(valid_files[0]).name
+            display = self._short_filename(Path(valid_files[0]).name)
         else:
             display = f"{len(valid_files)} files selected"
 
@@ -314,234 +342,202 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
             w.grid_forget()
 
         if file_type == "video":
-            self.quality_label.configure(text="Quality:")
-            self.video_quality_menu.grid(row=0, column=1, padx=(0, 10), sticky="w")
+            extracting = self.video_output_format.get() in self.AUDIO_FORMATS
+            self.quality_label.configure(text="Bitrate:" if extracting else "Quality:")
+            (self.audio_bitrate_menu if extracting else self.video_quality_menu).grid(row=0, column=1, padx=(0, 20), pady=4, sticky="ew")
             self.format_label.configure(text="Output Format:")
-            self.video_format_menu.grid(row=1, column=1, padx=(0, 10), sticky="w")
+            self.video_format_menu.grid(row=1, column=1, padx=(0, 20), pady=4, sticky="ew")
         elif file_type == "audio":
             self.quality_label.configure(text="Bitrate:")
-            self.audio_bitrate_menu.grid(row=0, column=1, padx=(0, 10), sticky="w")
+            self.audio_bitrate_menu.grid(row=0, column=1, padx=(0, 20), pady=4, sticky="ew")
             self.format_label.configure(text="Output Format:")
-            self.audio_format_menu.grid(row=1, column=1, padx=(0, 10), sticky="w")
+            self.audio_format_menu.grid(row=1, column=1, padx=(0, 20), pady=4, sticky="ew")
         else:  # image
             self.quality_label.configure(text="Quality:")
-            self.image_quality_menu.grid(row=0, column=1, padx=(0, 10), sticky="w")
+            self.image_quality_menu.grid(row=0, column=1, padx=(0, 20), pady=4, sticky="ew")
             self.format_label.configure(text="Output Format:")
-            self.image_format_menu.grid(row=1, column=1, padx=(0, 10), sticky="w")
+            self.image_format_menu.grid(row=1, column=1, padx=(0, 20), pady=4, sticky="ew")
+        self._update_mode_options()
+
+    def _update_mode_options(self, _choice=None) -> None:
+        kind = self.current_file_type or "video"
+        copy = self.conversion_mode.get() == "Copy streams" and kind != "image"
+        self.mode_menu.configure(state="disabled" if kind == "image" else "normal")
+        speed_applies = kind == "video" and self.video_output_format.get() in {"mp4", "mkv", "mov", "m4v", "ts", "webm"}
+        self.speed_menu.configure(state="normal" if speed_applies and not copy else "disabled")
+        for widget in (self.video_quality_menu, self.audio_bitrate_menu):
+            widget.configure(state="disabled" if copy else "normal")
+        if copy:
+            text = "Copy streams skips encoding and preserves quality. The output container must support the source codecs."
+        elif kind == "image":
+            text = "Image quality applies when supported by the selected format."
+        elif speed_applies:
+            text = "Fast saves encoding time; slower speeds favor smaller files. Quality is controlled separately."
+        else:
+            text = "The selected output uses its own codec settings; video encoding speed does not apply."
+        self.encoding_hint.configure(text=text)
 
     # ─────────────────────────────────────────────────────────────────────
     #  UI SETUP — green dark theme matching the mockup
     # ─────────────────────────────────────────────────────────────────────
     def setup_ui(self) -> None:
-        """Build every widget in the application window."""
+        """A compact setup area with progress and actions fixed below it."""
         C = self.COLORS
+        family = tkfont.nametofont("TkDefaultFont").actual("family")
+        self._label_font = ctk.CTkFont(family=family, size=14, weight="bold")
+        self._small_font = ctk.CTkFont(family=family, size=13)
+        self._btn_font = ctk.CTkFont(family=family, size=13, weight="bold")
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        # ── Scrollable main frame ────────────────────────────────────────
-        self.main_frame = ctk.CTkFrame(self, fg_color=C['bg'])
-        self.main_frame.pack(fill="both", expand=True, padx=20, pady=15)
-
-        # ── Title ────────────────────────────────────────────────────────
-        if self.has_bubblegum:
-            title_font = ctk.CTkFont(family="Bubblegum Sans", size=42, weight="bold")
-        else:
-            title_font = ctk.CTkFont(size=42, weight="bold")
-
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(22, 18))
+        header.grid_columnconfigure(0, weight=1)
         self.title_label = ctk.CTkLabel(
-            self.main_frame,
-            text="Lace's Total File Converter",
-            font=title_font,
-            text_color=C['accent_light'],
-        )
-        self.title_label.pack(pady=(0, 18))
+            header, text="Lace's Total File Converter", anchor="center",
+            font=ctk.CTkFont(family="Bubblegum Sans", size=38, weight="bold"), text_color=C['accent_light'])
+        self.title_label.grid(row=0, column=0, sticky="ew")
 
-        # ── Shared fonts ─────────────────────────────────────────────────
-        if self.has_bartino:
-            self._label_font = ctk.CTkFont(family="Bartino", size=15, weight="bold")
-            self._small_font = ctk.CTkFont(family="Bartino", size=13)
-            self._btn_font = ctk.CTkFont(family="Bartino", size=13, weight="bold")
-        else:
-            self._label_font = ctk.CTkFont(size=15, weight="bold")
-            self._small_font = ctk.CTkFont(size=13)
-            self._btn_font = ctk.CTkFont(size=13, weight="bold")
+        self.main_frame = AutoHideScrollableFrame(self, fg_color=C['bg'],
+                                                   scrollbar_button_color="#385a46",
+                                                   scrollbar_button_hover_color=C['accent'])
+        self.main_frame.grid(row=1, column=0, sticky="nsew", padx=24)
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        card_kw = dict(fg_color=C['frame_bg'], corner_radius=10, border_width=1, border_color="#294735")
+        button_kw = dict(height=36, corner_radius=7, font=self._btn_font,
+                         fg_color=C['button'], hover_color=C['button_hover'],
+                         text_color=C['text'], text_color_disabled="#799184")
+        secondary_kw = dict(button_kw, fg_color=C['entry_bg'], hover_color="#254e36", border_width=1, border_color="#365940")
 
-        # ═══════════════════════════════════════════════════════════════
-        #  STEP 1 — Select Files
-        # ═══════════════════════════════════════════════════════════════
-        self.input_frame = ctk.CTkFrame(self.main_frame, fg_color=C['frame_bg'],
-                                        corner_radius=12, border_width=1,
-                                        border_color=C['accent_dark'])
-        self.input_frame.pack(fill="x", pady=(0, 10))
+        self.input_frame = ctk.CTkFrame(self.main_frame, **card_kw)
+        self.input_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.input_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.input_frame, text="1   Files", font=self._label_font,
+                     text_color=C['text']).grid(row=0, column=0, padx=16, pady=(10, 6))
+        file_actions = ctk.CTkFrame(self.input_frame, fg_color="transparent")
+        file_actions.grid(row=1, column=0, pady=(0, 4))
+        self.browse_input_btn = ctk.CTkButton(file_actions, text="Browse files", command=self.browse_input,
+                                              width=126, **button_kw)
+        self.browse_input_btn.grid(row=0, column=0, padx=(0, 10))
+        self.clear_btn = ctk.CTkButton(file_actions, text="Clear", command=self.clear_files,
+                                       width=74, **secondary_kw)
+        self.clear_btn.grid(row=0, column=1)
+        self.empty_selection_text = "Drop files here or use Browse files." if self.dnd_available else "Choose one or more files with Browse files."
+        self.file_status_label = ctk.CTkLabel(self.input_frame, text=self.empty_selection_text, width=1,
+                                             font=self._small_font, text_color=C['text_dim'], anchor="center")
+        self.file_status_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
 
-        ctk.CTkLabel(
-            self.input_frame, text="Step 1: Select Files",
-            font=self._label_font, text_color=C['text'],
-        ).pack(anchor="w", padx=18, pady=(14, 8))
+        self.options_frame = ctk.CTkFrame(self.main_frame, **card_kw)
+        self.options_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        ctk.CTkLabel(self.options_frame, text="2   Conversion settings", font=self._label_font,
+                     text_color=C['text']).pack(padx=16, pady=(10, 6))
+        opts_grid = ctk.CTkFrame(self.options_frame, fg_color="transparent")
+        opts_grid.pack(padx=16, pady=(0, 6))
+        self.quality_label = ctk.CTkLabel(opts_grid, text="Quality:", font=self._small_font, text_color=C['text'])
+        self.quality_label.grid(row=0, column=0, padx=(0, 12), sticky="e")
+        self.format_label = ctk.CTkLabel(opts_grid, text="Output format:", font=self._small_font, text_color=C['text'])
+        self.format_label.grid(row=1, column=0, padx=(0, 12), sticky="e")
+        menu_kw = dict(width=150, height=36, corner_radius=7, font=self._small_font,
+                       dropdown_font=self._small_font, dynamic_resizing=False,
+                       fg_color=C['entry_bg'], button_color="#274e36", button_hover_color="#356849",
+                       text_color=C['text'], text_color_disabled="#799184",
+                       dropdown_fg_color=C['frame_bg'], dropdown_hover_color=C['accent_dark'], dropdown_text_color=C['text'])
+        self.video_quality_menu = ctk.CTkOptionMenu(opts_grid, values=["High", "Medium", "Low"],
+                                                   variable=self.video_quality, **menu_kw)
+        self.audio_bitrate_menu = ctk.CTkOptionMenu(opts_grid, values=["320 kbps", "256 kbps", "192 kbps", "128 kbps"],
+                                                   variable=self.audio_bitrate, **menu_kw)
+        self.image_quality_menu = ctk.CTkOptionMenu(opts_grid, values=["100 (Best)", "95", "90", "85", "80", "75", "70"],
+                                                   variable=self.image_quality, **menu_kw)
+        self.video_format_menu = ctk.CTkOptionMenu(opts_grid, values=self.VIDEO_PLUS_AUDIO_FORMATS,
+                                                  variable=self.video_output_format, command=self._on_video_format_selected, **menu_kw)
+        self.audio_format_menu = ctk.CTkOptionMenu(opts_grid, values=self.AUDIO_FORMATS,
+                                                  variable=self.audio_output_format, **menu_kw)
+        self.image_format_menu = ctk.CTkOptionMenu(opts_grid, values=self.IMAGE_FORMATS,
+                                                  variable=self.image_output_format, **menu_kw)
+        ctk.CTkLabel(opts_grid, text="Encoding speed:", font=self._small_font, text_color=C['text']).grid(
+            row=0, column=2, padx=(0, 12), sticky="e")
+        self.speed_menu = ctk.CTkOptionMenu(opts_grid, values=["Fast", "Balanced", "Smaller files"],
+                                           variable=self.encoding_speed, **menu_kw)
+        self.speed_menu.grid(row=0, column=3, pady=4, sticky="ew")
+        ctk.CTkLabel(opts_grid, text="Mode:", font=self._small_font, text_color=C['text']).grid(
+            row=1, column=2, padx=(0, 12), sticky="e")
+        self.mode_menu = ctk.CTkOptionMenu(opts_grid, values=["Convert", "Copy streams"],
+                                          variable=self.conversion_mode, command=self._update_mode_options, **menu_kw)
+        self.mode_menu.grid(row=1, column=3, pady=4, sticky="ew")
+        self.encoding_hint = ctk.CTkLabel(self.options_frame, text="", font=self._small_font, width=1,
+                                         text_color=C['text_dim'], wraplength=800, justify="center", anchor="center")
+        self.encoding_hint.pack(fill="x", padx=16, pady=(0, 12))
+        self.options_frame.bind("<Configure>", lambda e: self.encoding_hint.configure(
+            wraplength=max(200, e.width / self.options_frame._get_widget_scaling() - 36)))
+        self.update_ui_for_file_type("video")
 
-        # Buttons row — centred
-        btn_row = ctk.CTkFrame(self.input_frame, fg_color=C['frame_bg'])
-        btn_row.pack(pady=(0, 6))
-
-        self.browse_input_btn = ctk.CTkButton(
-            btn_row, text="Browse for Files", command=self.browse_input,
-            width=160, height=38, font=self._btn_font,
-            fg_color=C['button'], hover_color=C['button_hover'], corner_radius=8,
-        )
-        self.browse_input_btn.pack(side="left", padx=(0, 12))
-
-        self.clear_btn = ctk.CTkButton(
-            btn_row, text="Clear", command=self.clear_files,
-            width=90, height=38, font=self._btn_font,
-            fg_color="#3d5c4a", hover_color=C['button_hover'], corner_radius=8,
-        )
-        self.clear_btn.pack(side="left")
-
-        # File-status label (replaces the old textbox)
-        self.file_status_label = ctk.CTkLabel(
-            self.input_frame, text="No files selected",
-            font=self._small_font, text_color=C['text_dim'],
-        )
-        self.file_status_label.pack(pady=(2, 14))
-
-        # ═══════════════════════════════════════════════════════════════
-        #  STEP 2 — Quality & Output Format
-        # ═══════════════════════════════════════════════════════════════
-        self.options_frame = ctk.CTkFrame(self.main_frame, fg_color=C['frame_bg'],
-                                          corner_radius=12, border_width=1,
-                                          border_color=C['accent_dark'])
-        self.options_frame.pack(fill="x", pady=(0, 10))
-
-        ctk.CTkLabel(
-            self.options_frame, text="Step 2: Choose Quality & Output Format",
-            font=self._label_font, text_color=C['text'],
-        ).pack(anchor="w", padx=18, pady=(14, 10))
-
-        # Grid of label + dropdown, centred
-        opts_grid = ctk.CTkFrame(self.options_frame, fg_color=C['frame_bg'])
-        opts_grid.pack(pady=(0, 16))
-
-        self.quality_label = ctk.CTkLabel(opts_grid, text="Quality:",
-                                          font=self._small_font, text_color=C['text'])
-        self.quality_label.grid(row=0, column=0, padx=(10, 8), pady=4, sticky="e")
-
-        self.format_label = ctk.CTkLabel(opts_grid, text="Output Format:",
-                                         font=self._small_font, text_color=C['text'])
-        self.format_label.grid(row=1, column=0, padx=(10, 8), pady=4, sticky="e")
-
-        menu_kw = dict(width=150, height=32, font=self._small_font,
-                       fg_color=C['button'], button_color=C['accent'],
-                       button_hover_color=C['accent_light'],
-                       dropdown_fg_color=C['frame_bg'],
-                       dropdown_hover_color=C['accent_dark'],
-                       dropdown_text_color=C['text'])
-
-        self.video_quality_menu = ctk.CTkOptionMenu(
-            opts_grid, values=["High", "Medium", "Low"],
-            variable=self.video_quality, **menu_kw)
-
-        self.audio_bitrate_menu = ctk.CTkOptionMenu(
-            opts_grid, values=["320 kbps", "256 kbps", "192 kbps", "128 kbps"],
-            variable=self.audio_bitrate, **menu_kw)
-
-        self.image_quality_menu = ctk.CTkOptionMenu(
-            opts_grid, values=["100 (Best)", "95", "90", "85", "80", "75", "70"],
-            variable=self.image_quality, **menu_kw)
-
-        self.video_format_menu = ctk.CTkOptionMenu(
-            opts_grid, values=self.VIDEO_PLUS_AUDIO_FORMATS,
-            variable=self.video_output_format,
-            command=self._on_video_format_selected, **menu_kw)
-
-        self.audio_format_menu = ctk.CTkOptionMenu(
-            opts_grid, values=self.AUDIO_FORMATS,
-            variable=self.audio_output_format, **menu_kw)
-
-        self.image_format_menu = ctk.CTkOptionMenu(
-            opts_grid, values=self.IMAGE_FORMATS,
-            variable=self.image_output_format, **menu_kw)
-
-        # ═══════════════════════════════════════════════════════════════
-        #  STEP 3 — Output Folder
-        # ═══════════════════════════════════════════════════════════════
-        self.output_frame = ctk.CTkFrame(self.main_frame, fg_color=C['frame_bg'],
-                                         corner_radius=12, border_width=1,
-                                         border_color=C['accent_dark'])
-        self.output_frame.pack(fill="x", pady=(0, 10))
-
-        ctk.CTkLabel(
-            self.output_frame, text="Step 3: Choose Output Folder",
-            font=self._label_font, text_color=C['text'],
-        ).pack(anchor="w", padx=18, pady=(14, 8))
-
-        out_row = ctk.CTkFrame(self.output_frame, fg_color=C['frame_bg'])
-        out_row.pack(fill="x", padx=18, pady=(0, 14))
-
-        ctk.CTkLabel(out_row, text="Save to:", font=self._small_font,
-                     text_color=C['text']).pack(side="left", padx=(0, 8))
-
-        self.output_entry = ctk.CTkEntry(
-            out_row, textvariable=self.output_folder, height=34,
-            font=self._small_font, border_color=C['border'],
-            fg_color=C['entry_bg'], text_color=C['text'],
-        )
-        self.output_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-        self.recent_dropdown = ctk.CTkOptionMenu(
-            out_row, values=["Recent..."], command=self.on_recent_selected,
-            width=100, height=34, font=self._small_font,
-            fg_color=C['button'], button_color=C['accent'],
-            button_hover_color=C['accent_light'],
-            dropdown_fg_color=C['frame_bg'],
-            dropdown_hover_color=C['accent_dark'],
-            dropdown_text_color=C['text'],
-        )
-        self.recent_dropdown.pack(side="left", padx=(0, 8))
+        self.output_frame = ctk.CTkFrame(self.main_frame, **card_kw)
+        self.output_frame.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        self.output_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.output_frame, text="3   Save to", font=self._label_font,
+                     text_color=C['text']).grid(row=0, column=0, columnspan=3, padx=16, pady=(10, 6))
+        self.output_entry = ctk.CTkEntry(self.output_frame, textvariable=self.output_folder, height=36,
+                                         font=self._small_font, border_width=1, corner_radius=7,
+                                         border_color="#365940", fg_color=C['entry_bg'], text_color=C['text'])
+        self.output_entry.grid(row=1, column=0, sticky="ew", padx=(16, 8), pady=(2, 14))
+        self.recent_dropdown = ctk.CTkOptionMenu(self.output_frame, values=["Recent folders"],
+                                                 command=self.on_recent_selected, **dict(menu_kw, width=148))
+        self.recent_dropdown.grid(row=1, column=1, padx=(0, 8), pady=(2, 14))
         self.update_recent_dropdown()
+        self.browse_output_btn = ctk.CTkButton(self.output_frame, text="Browse", command=self.browse_output,
+                                                width=86, **secondary_kw)
+        self.browse_output_btn.grid(row=1, column=2, padx=(0, 16), pady=(2, 14))
 
-        self.browse_output_btn = ctk.CTkButton(
-            out_row, text="Browse", command=self.browse_output,
-            width=80, height=34, font=self._btn_font,
-            fg_color=C['button'], hover_color=C['button_hover'], corner_radius=8,
-        )
-        self.browse_output_btn.pack(side="left")
-
-        # ═══════════════════════════════════════════════════════════════
-        #  CONVERT / CANCEL button
-        # ═══════════════════════════════════════════════════════════════
-        self.convert_btn = ctk.CTkButton(
-            self.main_frame, text="START CONVERSION",
-            command=self.start_conversion, height=52,
-            font=ctk.CTkFont(size=17, weight="bold"),
-            fg_color=C['accent'], hover_color=C['accent_light'],
-            corner_radius=10,
-        )
-        self.convert_btn.pack(fill="x", pady=(4, 10))
-
-        # ═══════════════════════════════════════════════════════════════
-        #  PROGRESS section
-        # ═══════════════════════════════════════════════════════════════
-        self.progress_frame = ctk.CTkFrame(self.main_frame, fg_color=C['frame_bg'],
-                                            corner_radius=12, border_width=1,
-                                            border_color=C['accent_dark'])
-        self.progress_frame.pack(fill="x", pady=(0, 0))
-
-        ctk.CTkLabel(
-            self.progress_frame, text="Progress:",
-            font=self._label_font, text_color=C['text'],
-        ).pack(anchor="w", padx=18, pady=(12, 6))
-
-        self.progress_bar = ctk.CTkProgressBar(
-            self.progress_frame, height=18,
-            progress_color=C['accent_light'],
-            fg_color=C['progress_track'], corner_radius=8,
-        )
-        self.progress_bar.pack(fill="x", padx=18, pady=(0, 6))
+        # Always visible: scrolling setup must never hide progress or Cancel.
+        self.progress_frame = ctk.CTkFrame(self, **card_kw)
+        self.progress_frame.grid(row=2, column=0, sticky="ew", padx=24, pady=(12, 20))
+        self.progress_frame.grid_columnconfigure(0, weight=1)
+        progress_header = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
+        progress_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 6))
+        progress_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(progress_header, text="Conversion progress", font=self._label_font,
+                     text_color=C['text']).grid(row=0, column=0)
+        self.status_label = ctk.CTkLabel(self.progress_frame, text="Ready. Select your files to get started.",
+                                        width=1, height=22, font=self._small_font, text_color=C['text_dim'], anchor="center")
+        self.status_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        bars = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
+        bars.grid(row=2, column=0, sticky="ew", padx=16)
+        bars.grid_columnconfigure((0, 1), weight=1, uniform="progress")
+        self.file_progress_label = ctk.CTkLabel(bars, text="Current file: 0%", font=self._small_font,
+                                               height=24, text_color=C['text'], anchor="center")
+        self.file_progress_label.grid(row=0, column=0, sticky="ew", padx=(0, 16))
+        self.batch_progress_label = ctk.CTkLabel(bars, text="Batch: 0 files processed", font=self._small_font,
+                                                height=24, text_color=C['text'], anchor="center")
+        self.batch_progress_label.grid(row=0, column=1, sticky="ew")
+        bar_kw = dict(height=10, corner_radius=5, fg_color=C['progress_track'])
+        self.progress_bar = ctk.CTkProgressBar(bars, progress_color=C['accent_light'], **bar_kw)
+        self.progress_bar.grid(row=1, column=0, sticky="ew", padx=(0, 16), pady=(2, 8))
         self.progress_bar.set(0)
+        self.batch_progress_bar = ctk.CTkProgressBar(bars, progress_color=C['accent'], **bar_kw)
+        self.batch_progress_bar.grid(row=1, column=1, sticky="ew", pady=(2, 8))
+        self.batch_progress_bar.set(0)
+        self.metrics_label = ctk.CTkLabel(self.progress_frame, text="Elapsed: 0:00   ·   File remaining: —   ·   Speed: —",
+                                         font=self._small_font, text_color=C['text'], height=24, anchor="center")
+        self.metrics_label.grid(row=3, column=0, sticky="ew", padx=16)
+        self.media_label = ctk.CTkLabel(self.progress_frame, text="Media processed: —", font=self._small_font,
+                                       text_color=C['text_dim'], height=24, anchor="center")
+        self.media_label.grid(row=4, column=0, sticky="ew", padx=16)
+        result_row = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
+        result_row.grid(row=5, column=0, sticky="ew", padx=16, pady=(8, 14))
+        result_row.grid_columnconfigure((0, 2), weight=1, uniform="actions")
+        self.convert_btn = ctk.CTkButton(result_row, text="Start conversion", command=self.start_conversion,
+                                         width=178, **button_kw)
+        self.convert_btn.grid(row=0, column=1)
+        self.details_btn = ctk.CTkButton(result_row, text="View details", command=self.show_details,
+                                        width=124, state="disabled", **secondary_kw)
+        self.details_btn.grid(row=0, column=0, sticky="e", padx=(0, 12))
+        self.open_output_btn = ctk.CTkButton(result_row, text="Open output folder", state="disabled",
+                                            width=166, command=lambda: self.open_folder(self.batch_output), **secondary_kw)
+        self.open_output_btn.grid(row=0, column=2, sticky="w", padx=(12, 0))
 
-        self.status_label = ctk.CTkLabel(
-            self.progress_frame, text="Ready! Select your files to get started.",
-            font=self._small_font, text_color=C['text_dim'], anchor="w",
-        )
-        self.status_label.pack(anchor="w", padx=18, pady=(0, 14))
+    @staticmethod
+    def _short_filename(name: str, limit: int = 64) -> str:
+        return name if len(name) <= limit else name[:limit - 21] + "…" + name[-20:]
 
     # ─────────────────────────────────────────────────────────────────────
     #  Video format dropdown guard (skip the separator label)
@@ -550,15 +546,18 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
         """Guard the video format dropdown — ignore the separator label."""
         if choice == "── Audio Only ──":
             self.video_output_format.set("mp4")
+        self.update_ui_for_file_type("video")
 
     # ─────────────────────────────────────────────────────────────────────
     #  Browse / clear
     # ─────────────────────────────────────────────────────────────────────
     def clear_files(self) -> None:
         """Reset the file selection back to empty."""
+        if self.is_converting:
+            return
         self.input_files = []
         self.current_file_type = None
-        self.file_status_label.configure(text="No files selected",
+        self.file_status_label.configure(text=self.empty_selection_text,
                                          text_color=self.COLORS['text_dim'])
 
     def browse_input(self) -> None:
@@ -595,6 +594,7 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
             self.recent_dropdown.configure(values=names)
         else:
             self.recent_dropdown.configure(values=["No recent folders"])
+        self.recent_dropdown.set("Recent folders")
 
     def on_recent_selected(self, choice: str) -> None:
         if choice and choice != "No recent folders":
@@ -604,357 +604,202 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper):
                     self.output_folder.set(self.recent_folders[i])
                     break
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Thread-safe UI helpers
-    # ─────────────────────────────────────────────────────────────────────
-    def _set_progress(self, value: float) -> None:
-        """Thread-safe progress-bar update."""
-        self.after(0, lambda: self.progress_bar.set(value))
-
-    def _set_status(self, text: str) -> None:
-        """Thread-safe status-label update."""
-        self.after(0, lambda: self.status_label.configure(text=text))
-
-    def _enable_convert_btn(self) -> None:
-        """Thread-safe reset of the convert button back to its default state."""
-        self.after(0, lambda: self.convert_btn.configure(
-            state="normal", text="START CONVERSION",
-            command=self.start_conversion,
-            fg_color=self.COLORS['accent'],
-        ))
-
-    # ─────────────────────────────────────────────────────────────────────
-    #  Folder opener & completion dialog
-    # ─────────────────────────────────────────────────────────────────────
-    def open_folder(self, path: str) -> None:
-        """Open *path* in the platform's native file explorer."""
-        try:
-            if sys.platform == 'win32':
-                os.startfile(path)
-            elif sys.platform == 'darwin':
-                subprocess.run(['open', path], check=False)
-            else:
-                subprocess.run(['xdg-open', path], check=False)
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not open folder: {e}")
-
-    def show_completion_dialog(self) -> None:
-        """Play a notification sound and offer to open the output folder."""
-        self.play_notification_sound()
-        if messagebox.askyesno(
-            "Conversion Complete!",
-            "All files have been converted successfully!\n\n"
-            "Do you wanna open the output folder?",
-            icon='info',
-        ):
-            self.open_folder(self.output_folder.get())
-
-    # ─────────────────────────────────────────────────────────────────────
-    #  Cancel support
-    # ─────────────────────────────────────────────────────────────────────
-    def request_cancel(self) -> None:
-        """Signal the worker thread to stop and kill the running ffmpeg process."""
-        self.cancel_requested = True
-        if self.current_process:
+    # Worker threads send plain data; every Tk operation stays on the main thread.
+    def _poll_events(self) -> None:
+        for _ in range(100):
             try:
-                self.current_process.terminate()
-            except Exception:
-                pass
-        self._set_status("Cancelling…")
+                event, payload = self.ui_events.get_nowait()
+            except queue.Empty:
+                break
+            if event == "progress":
+                self._display_progress(*payload)
+            elif event == "result":
+                index, total, name, result = payload
+                label = "Cancelled" if result.cancelled else ("Saved" if result.output else "Failed")
+                detail = result.output or result.error or "Conversion cancelled."
+                self.details.append(f"[{index + 1}/{total}] {label}: {name}\n{detail}\n")
+            elif event == "finished":
+                self._finish_batch(*payload)
+        if self.closing and not self.is_converting:
+            self.destroy()
+            return
+        self.after(100, self._poll_events)
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Duration probe (for per-file progress)
-    # ─────────────────────────────────────────────────────────────────────
-    def _probe_duration(self, input_path: str) -> float | None:
-        """Return the media duration in seconds via ``ffprobe``, or *None*."""
+    def _display_progress(self, index: int, total: int, name: str, progress: Progress) -> None:
+        fraction = progress.fraction
+        unknown = fraction is None
+        if unknown != self.indeterminate:
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="indeterminate" if unknown else "determinate")
+            self.indeterminate = unknown
+            if unknown:
+                self.progress_bar.start()
+        if not unknown:
+            self.progress_bar.set(fraction)
+        self.batch_progress_bar.set((index + (fraction or 0)) / total)
+        percent = f"{fraction:.0%}" if fraction is not None else (
+            "Reading media…" if progress.phase in {"Preparing", "Reading media"} else "Duration unavailable")
+        phase = "Cancelling…" if self.cancel_event.is_set() else progress.phase
+        self.status_label.configure(text=f"File {index + 1} of {total} · {phase}: {self._short_filename(name)}")
+        self.file_progress_label.configure(text=f"Current file: {percent}")
+        self.batch_progress_label.configure(text=f"Batch: {index} of {total} files processed" if progress.phase != "Complete"
+                                           else f"Batch: {index + 1} of {total} files processed")
+        media = format_time(progress.media_seconds)
+        if progress.duration:
+            media += " / " + format_time(progress.duration)
+        speed = f"{progress.speed:.2f}×" if progress.speed else "Measuring…"
+        remaining = "Finalizing…" if progress.phase == "Finalizing" else format_time(progress.eta)
+        if unknown:
+            remaining = "Unavailable"
+        self.metrics_label.configure(text=f"Elapsed: {format_time(time.monotonic() - self.batch_started)}   ·   "
+                                     f"File remaining: {remaining}   ·   Speed: {speed}")
+        detail = f"Media processed: {media}"
+        if progress.fps:
+            detail += f"   ·   {progress.fps:.1f} fps"
+        if progress.size_bytes:
+            detail += f"   ·   Written: {progress.size_bytes / 1024**2:.1f} MiB"
+        self.media_label.configure(text=detail)
+
+    def _set_controls(self, busy: bool) -> None:
+        for widget in (self.browse_input_btn, self.clear_btn, self.browse_output_btn,
+                       self.output_entry, self.recent_dropdown, self.video_quality_menu,
+                       self.audio_bitrate_menu, self.image_quality_menu, self.video_format_menu,
+                       self.audio_format_menu, self.image_format_menu, self.speed_menu, self.mode_menu):
+            widget.configure(state="disabled" if busy else "normal")
+        if not busy:
+            self._update_mode_options()
+
+    def _finish_batch(self, successful: int, failed: int, total: int, cancelled: bool, fatal: str | None) -> None:
+        self.is_converting = False
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.indeterminate = False
+        if not cancelled and not fatal:
+            self.batch_progress_bar.set(1)
+        label = "Cancelled" if cancelled else "Finished"
+        if fatal:
+            label = "Stopped"
+            self.details.append(fatal)
+        self.status_label.configure(text=f"{label}: {successful}/{total} converted, {failed} failed."
+                                    + (" See details." if failed or fatal else ""))
+        self.batch_progress_label.configure(text=f"Batch: {successful + failed} of {total} files processed")
+        self.metrics_label.configure(text=f"Total elapsed: {format_time(time.monotonic() - self.batch_started)}")
+        self.file_progress_label.configure(text="Current file: " + ("Cancelled" if cancelled else "Complete" if successful == total else "See details"))
+        self.convert_btn.configure(state="normal", text="Start conversion", command=self.start_conversion,
+                                   fg_color=self.COLORS['accent'], hover_color=self.COLORS['accent_light'])
+        self._set_controls(False)
+        self.details_btn.configure(state="normal")
+        self.open_output_btn.configure(state="normal")
+        if successful and not cancelled and not self.closing:
+            self.play_notification_sound()
+
+    def show_details(self) -> None:
+        window = ctk.CTkToplevel(self)
+        window.title("Conversion details")
+        window.geometry("800x450")
+        box = ctk.CTkTextbox(window, wrap="word")
+        box.pack(fill="both", expand=True, padx=15, pady=15)
+        box.insert("1.0", "\n".join(self.details) or "No conversions yet.")
+        box.configure(state="disabled")
+        window.after(50, window.lift)
+
+    def open_folder(self, path: str) -> None:
         try:
-            ffmpeg_bin = os.environ.get('FFMPEG_BINARY', 'ffmpeg')
-            # Derive ffprobe path by replacing only the final filename component
-            # to avoid corrupting paths like  C:\tools\ffmpeg-7.1\ffmpeg.exe
-            parent = os.path.dirname(ffmpeg_bin)
-            basename = os.path.basename(ffmpeg_bin).replace('ffmpeg', 'ffprobe')
-            ffprobe = os.path.join(parent, basename) if parent else basename
-            if not os.path.isfile(ffprobe):
-                ffprobe = shutil.which('ffprobe') or 'ffprobe'
-
-            startupinfo = None
-            if sys.platform == 'win32':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            out = subprocess.check_output(
-                [ffprobe, '-v', 'error', '-show_entries', 'format=duration',
-                 '-of', 'csv=p=0', input_path],
-                stderr=subprocess.STDOUT, text=True, timeout=10,
-                startupinfo=startupinfo,
-            )
-            return float(out.strip())
-        except Exception:
-            return None
-
-    # ─────────────────────────────────────────────────────────────────────
-    #  Single-file conversion
-    # ─────────────────────────────────────────────────────────────────────
-    @staticmethod
-    def _audio_codec_args(output_ext: str, bitrate: str) -> list[str]:
-        """Return the ffmpeg codec/bitrate flags for an audio output format.
-
-        Parameters
-        ----------
-        output_ext : str
-            Lowercase extension *with* the leading dot (e.g. ``'.mp3'``).
-        bitrate : str
-            Numeric bitrate in kbps (e.g. ``'320'``).
-        """
-        if output_ext == '.mp3':
-            return ['-codec:a', 'libmp3lame', '-b:a', f'{bitrate}k']
-        if output_ext in ('.aac', '.m4a'):
-            return ['-codec:a', 'aac', '-b:a', f'{bitrate}k']
-        if output_ext == '.opus':
-            return ['-codec:a', 'libopus', '-b:a', f'{bitrate}k']
-        if output_ext == '.ogg':
-            return ['-codec:a', 'libvorbis', '-q:a', '8']
-        if output_ext == '.wav':
-            return ['-codec:a', 'pcm_s16le']
-        if output_ext == '.flac':
-            return ['-codec:a', 'flac']
-        if output_ext == '.aiff':
-            return ['-codec:a', 'pcm_s16be']
-        if output_ext == '.wma':
-            return ['-codec:a', 'wmav2', '-b:a', f'{bitrate}k']
-        return ['-b:a', f'{bitrate}k']
-
-    def convert_file(
-        self,
-        input_path: str,
-        output_path: str,
-        file_type: str,
-        file_index: int = 0,
-        total_files: int = 1,
-    ) -> bool:
-        """Convert a single file with ffmpeg.  Returns *True* on success."""
-        try:
-            if not self.ffmpeg_available:
-                return False
-
-            ffmpeg_cmd = os.environ.get('FFMPEG_BINARY', 'ffmpeg')
-            cmd: list[str] = [ffmpeg_cmd, '-i', input_path]
-
-            output_ext = Path(output_path).suffix.lower()
-
-            # Detect if we're extracting audio from video
-            is_video_to_audio = (
-                file_type == "video"
-                and output_ext.lstrip('.') in self.AUDIO_FORMATS
-            )
-
-            if is_video_to_audio:
-                # Extract audio track from a video file
-                cmd.extend(self._audio_codec_args(output_ext, '192'))
-                cmd.append('-vn')
-
-            elif file_type == "video":
-                quality = self.video_quality.get()
-                if output_ext == '.ogv':
-                    q_map = {"High": '8', "Medium": '5', "Low": '3'}
-                    cmd.extend(['-c:v', 'libtheora', '-q:v', q_map.get(quality, '5'),
-                                '-c:a', 'libvorbis', '-q:a', '6'])
-                elif output_ext == '.ts':
-                    crf_map = {"High": '18', "Medium": '23', "Low": '28'}
-                    cmd.extend(['-c:v', 'libx264', '-crf', crf_map.get(quality, '23'),
-                                '-c:a', 'aac', '-b:a', '192k', '-f', 'mpegts'])
-                else:
-                    crf_map = {"High": '18', "Medium": '23', "Low": '28'}
-                    preset_map = {"High": 'slow', "Medium": 'medium', "Low": 'fast'}
-                    cmd.extend(['-preset', preset_map.get(quality, 'medium'),
-                                '-crf', crf_map.get(quality, '23'),
-                                '-c:a', 'aac', '-b:a', '192k'])
-
-            elif file_type == "audio":
-                bitrate = self.audio_bitrate.get().split()[0]
-                cmd.extend(self._audio_codec_args(output_ext, bitrate))
-                cmd.append('-vn')
-
-            else:  # image
-                quality = self.image_quality.get().split()[0]
-                if output_ext in ('.jpg', '.jpeg'):
-                    cmd.extend(['-q:v', str(max(1, int((100 - int(quality)) / 10)))])
-                elif output_ext == '.png':
-                    cmd.extend(['-compression_level', '9'])
-                elif output_ext == '.webp':
-                    cmd.extend(['-quality', quality])
-                elif output_ext == '.ico':
-                    cmd.extend(['-vframes', '1'])
-                elif output_ext == '.avif':
-                    cmd.extend(['-c:v', 'libaom-av1', '-still-picture', '1',
-                                '-crf', str(max(0, 63 - int(int(quality) * 63 / 100)))])
-
-            cmd.extend(['-y'])
-
-            # For video/audio: use -progress for real-time progress
-            duration = None
-            use_progress = file_type in ("video", "audio") or is_video_to_audio
-            if use_progress:
-                duration = self._probe_duration(input_path)
-                if duration:
-                    cmd.extend(['-progress', 'pipe:1'])
-
-            cmd.append(output_path)
-
-            startupinfo = None
-            if sys.platform == 'win32':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, startupinfo=startupinfo,
-            )
-            self.current_process = process
-
-            if duration and use_progress:
-                # Read progress from stdout
-                for line in process.stdout:
-                    if self.cancel_requested:
-                        process.terminate()
-                        return False
-                    m = re.search(r'out_time_us=(\d+)', line)
-                    if m:
-                        current_s = int(m.group(1)) / 1_000_000
-                        file_frac = min(current_s / duration, 1.0)
-                        overall = (file_index + file_frac) / total_files
-                        self._set_progress(overall)
-                process.wait()
+            if sys.platform == "win32":
+                os.startfile(path)
             else:
-                process.communicate()
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
+        except Exception as exc:
+            messagebox.showerror("Error", f"Could not open folder: {exc}")
 
-            self.current_process = None
-            return process.returncode == 0
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
+        self.convert_btn.configure(state="disabled", text="Cancelling…")
+        self.status_label.configure(text="Cancelling… Cleaning up the current file.")
 
-        except Exception as e:
-            self._set_status(f"Error: {Path(input_path).name}: {e}")
-            self.current_process = None
-            return False
+    def on_close(self) -> None:
+        self.closing = True
+        if self.is_converting:
+            self.request_cancel()
+        else:
+            self.destroy()
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Batch conversion (runs in worker thread)
-    # ─────────────────────────────────────────────────────────────────────
-    def batch_convert(self) -> None:
-        """Convert every file in ``self.input_files`` (runs in a worker thread)."""
+    def batch_convert(self, files: tuple[str, ...], kinds: tuple[str, ...], output_dir: str, settings: Settings) -> None:
+        successful = failed = 0
+        fatal = None
         try:
-            if not self.ffmpeg_available:
-                self._set_status("Error: FFmpeg is required!")
-                return
-
-            output_dir = self.output_folder.get()
-            file_type = self.current_file_type
-
-            # Determine output extension
-            if file_type == "video":
-                ext = self.video_output_format.get()
-                # If user picked the separator, fall back
-                if ext == "── Audio Only ──":
-                    ext = "mp4"
-            elif file_type == "audio":
-                ext = self.audio_output_format.get()
-            else:
-                ext = self.image_output_format.get()
-
-            total = len(self.input_files)
-            successful = 0
-
-            for i, input_path in enumerate(self.input_files):
-                if self.cancel_requested:
-                    self._set_status(f"Cancelled. {successful}/{total} files converted.")
+            converter = Converter(self.ffmpeg_binary, self.ffprobe_binary)
+            for index, (source, kind) in enumerate(zip(files, kinds)):
+                if self.cancel_event.is_set():
                     break
-
-                name = Path(input_path).name
-                self._set_status(f"[{i + 1}/{total}] Converting: {name}")
-                self._set_progress(i / total)
-
-                out_name = f"{Path(input_path).stem}_converted.{ext}"
-                output_path = os.path.join(output_dir, out_name)
-
-                counter = 1
-                while os.path.exists(output_path):
-                    output_path = os.path.join(
-                        output_dir, f"{Path(input_path).stem}_converted_{counter}.{ext}")
-                    counter += 1
-
-                ok = self.convert_file(input_path, output_path, file_type,
-                                       file_index=i, total_files=total)
-
-                if self.cancel_requested:
-                    # Clean up partial file
-                    try:
-                        if os.path.exists(output_path):
-                            os.remove(output_path)
-                    except Exception:
-                        pass
-                    self._set_status(f"Cancelled. {successful}/{total} files converted.")
+                name = Path(source).name
+                def report(progress, i=index, n=name):
+                    self.ui_events.put(("progress", (i, len(files), n, progress)))
+                report(Progress("Preparing", 0))
+                result = converter.convert(source, output_dir, kind, settings, self.cancel_event, report)
+                self.ui_events.put(("result", (index, len(files), name, result)))
+                if result.cancelled:
                     break
-
-                if ok:
+                if result.output:
                     successful += 1
-                    self._set_status(f"[{i + 1}/{total}] ✓ {name}")
                 else:
-                    self._set_status(f"[{i + 1}/{total}] ✗ Failed: {name}")
-
-            if not self.cancel_requested:
-                self._set_progress(1.0)
-                self._set_status(f"Done! {successful}/{total} files converted successfully.")
-                if successful > 0:
-                    self.after(200, self.show_completion_dialog)
-
-        except Exception as e:
-            self._set_status(f"Error: {e}")
+                    failed += 1
+        except Exception as exc:
+            fatal = str(exc)
         finally:
-            self.is_converting = False
-            self.cancel_requested = False
-            self.current_process = None
-            self._enable_convert_btn()
+            self.ui_events.put(("finished", (successful, failed, len(files), self.cancel_event.is_set(), fatal)))
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Start / Cancel
-    # ─────────────────────────────────────────────────────────────────────
     def start_conversion(self) -> None:
-        """Validate inputs and launch :meth:`batch_convert` in a daemon thread."""
-        if not self.ffmpeg_available:
-            messagebox.showerror("FFmpeg Required",
-                                 "FFmpeg is required for file conversion!")
+        if self.is_converting:
+            return
+        if not self.check_ffmpeg():
+            self.show_ffmpeg_warning()
             return
         if not self.input_files:
-            messagebox.showwarning("No Input Files",
-                                   "Please select files to convert!")
+            messagebox.showwarning("No Input Files", "Please select files to convert.")
             return
-        if self.is_converting:
-            messagebox.showinfo("In Progress",
-                                "Please wait for the current conversion to finish!")
+        variables = {"video": self.video_output_format, "audio": self.audio_output_format, "image": self.image_output_format}
+        ext = variables[self.current_file_type].get()
+        kinds = tuple(self.detect_file_type(f) for f in self.input_files)
+        if "audio" in kinds and ext not in self.AUDIO_FORMATS:
+            messagebox.showwarning("Audio Output Required", "This batch contains audio files. Select an audio output format, or load only video files.")
             return
-
-        output_dir = self.output_folder.get()
-        if not os.path.exists(output_dir):
-            try:
-                os.makedirs(output_dir)
-            except Exception:
-                messagebox.showerror("Invalid Folder",
-                                     "Please select a valid output folder!")
-                return
-
+        output_dir = self.output_folder.get().strip()
+        if not output_dir:
+            messagebox.showerror("Invalid Folder", "Please select an output folder.")
+            return
+        output_dir = str(Path(output_dir).expanduser().absolute())
+        try:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            if not Path(output_dir).is_dir():
+                raise OSError("Not a directory")
+        except OSError as exc:
+            messagebox.showerror("Invalid Folder", f"Cannot use the output folder: {exc}")
+            return
+        settings = Settings(ext, self.video_quality.get(), self.encoding_speed.get(),
+                            self.audio_bitrate.get().split()[0], int(self.image_quality.get().split()[0]),
+                            self.conversion_mode.get() == "Copy streams" and self.current_file_type != "image")
+        self.cancel_event.clear()
         self.is_converting = True
-        self.cancel_requested = False
+        self.batch_started = time.monotonic()
+        self.batch_output = output_dir
+        self.details = []
         self.progress_bar.set(0)
+        self.batch_progress_bar.set(0)
         self.add_recent_folder(output_dir)
-
-        # Switch button to Cancel mode
-        self.convert_btn.configure(
-            text="CANCEL", command=self.request_cancel,
-            fg_color="#8b2e2e", hover_color="#b33c3c",
-        )
-
-        threading.Thread(target=self.batch_convert, daemon=True).start()
+        self._set_controls(True)
+        self.details_btn.configure(state="disabled")
+        self.open_output_btn.configure(state="disabled")
+        self.convert_btn.configure(text="Cancel", command=self.request_cancel,
+                                   fg_color="#8b2e2e", hover_color="#b33c3c")
+        self.worker = threading.Thread(target=self.batch_convert,
+                                       args=(tuple(self.input_files), kinds, output_dir, settings), daemon=True)
+        self.worker.start()
 
 
 if __name__ == "__main__":
     app = FileConverterApp()
+    paths = [str(Path(p).expanduser().absolute()) for p in sys.argv[1:] if p != "--"]
+    if paths:
+        app.after(100, lambda: app.add_files(paths))
     app.mainloop()
