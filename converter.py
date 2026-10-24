@@ -41,6 +41,7 @@ class Settings:
     audio_bitrate: str = "192"
     image_quality: int = 95
     copy_streams: bool = False
+    audio_channels: str = "Original"
 
 
 @dataclass(frozen=True)
@@ -117,14 +118,28 @@ def audio_args(ext: str, bitrate: str) -> list[str]:
     return args
 
 
-def build_command(binary: str, source: str, target: str, kind: str, settings: Settings) -> list[str]:
+def channel_args(mode: str, source_channels: int | None) -> list[str]:
+    if mode == "Mono":
+        return ["-ac", "1"]
+    if mode == "Stereo":
+        # -ac 2 lowers a mono source by 3 dB per side; duplicate it at full level instead.
+        # Without ffprobe the channel count is unknown, so mono falls back to -ac 2.
+        return ["-af", "pan=stereo|c0=c0|c1=c0"] if source_channels == 1 else ["-ac", "2"]
+    return []
+
+
+def build_command(binary: str, source: str, target: str, kind: str, settings: Settings,
+                  source_channels: int | None = None) -> list[str]:
     """Choose codecs explicitly; container defaults do not share x264 options."""
     ext = settings.output_format
     cmd = [binary, "-hide_banner", "-nostdin", "-loglevel", "warning", "-nostats",
            "-stats_period", "0.25", "-progress", "pipe:1", "-i", source]
+    # Channel changes require re-encoding, so stream copies keep the source layout.
+    channels = [] if settings.copy_streams else channel_args(settings.audio_channels, source_channels)
     if kind != "image" and ext in AUDIO_FORMATS:
         cmd += ["-map", "0:a:0", "-vn"]
         cmd += ["-c:a", "copy"] if settings.copy_streams else audio_args(ext, settings.audio_bitrate)
+        cmd += channels
     elif kind == "video":
         if settings.copy_streams:
             # Keep all video/audio streams; subtitles/data can be container-specific.
@@ -149,7 +164,7 @@ def build_command(binary: str, source: str, target: str, kind: str, settings: Se
                 cmd += ["-c:v", "libx264", "-preset",
                         {"Fast": "veryfast", "Balanced": "medium", "Smaller files": "slow"}[settings.speed],
                         "-crf", crf, "-c:a", "aac", "-b:a", "192k"]
-            cmd += ["-pix_fmt", "yuv420p"]
+            cmd += ["-pix_fmt", "yuv420p"] + channels
         if ext in {"mp4", "mov", "m4v"}:
             cmd += ["-movflags", "+faststart"]
         if ext == "m4v":
@@ -199,34 +214,40 @@ class Converter:
         self.ffmpeg = ffmpeg
         self.ffprobe = ffprobe
 
-    def probe_duration(self, source: str, cancel: threading.Event,
-                       report: Callable[[Progress], None]) -> float | None:
+    def probe(self, source: str, cancel: threading.Event,
+              report: Callable[[Progress], None]) -> tuple[float | None, int | None]:
+        """Return the media duration and the first audio stream's channel count."""
+        unknown = (None, None)
         if not self.ffprobe or cancel.is_set():
-            return None
+            return unknown
         started = time.monotonic()
         try:
             process = subprocess.Popen(
-                [self.ffprobe, "-v", "error", "-show_entries", "format=duration:stream=duration",
+                [self.ffprobe, "-v", "error", "-show_entries",
+                 "format=duration:stream=duration,codec_type,channels",
                  "-of", "json", source], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", **process_options())
         except OSError:
-            return None
+            return unknown
         try:
             while not cancel.is_set() and time.monotonic() - started < 10:
                 report(Progress("Reading media", time.monotonic() - started))
                 try:
                     output, _ = process.communicate(timeout=0.25)
                     if process.returncode:
-                        return None
+                        return unknown
                     data = json.loads(output)
+                    streams = data.get("streams", [])
                     duration = positive_number(data.get("format", {}).get("duration"))
-                    durations = [positive_number(s.get("duration")) for s in data.get("streams", [])]
-                    return duration or max((d for d in durations if d), default=None)
+                    durations = [positive_number(s.get("duration")) for s in streams]
+                    channels = next((s.get("channels") for s in streams if s.get("codec_type") == "audio"), None)
+                    return (duration or max((d for d in durations if d), default=None),
+                            channels if isinstance(channels, int) and channels > 0 else None)
                 except subprocess.TimeoutExpired:
                     continue
-                except (ValueError, TypeError):
-                    return None
-            return None
+                except (ValueError, TypeError, AttributeError):
+                    return unknown
+            return unknown
         finally:
             stop_process(process)
             process.stdout.close()
@@ -241,12 +262,12 @@ class Converter:
         try:
             if cancel.is_set():
                 return Result(cancelled=True)
-            duration = self.probe_duration(source, cancel, report) if kind != "image" else None
+            duration, channels = self.probe(source, cancel, report) if kind != "image" else (None, None)
             if cancel.is_set():
                 return Result(cancelled=True)
             fd, temp_path = tempfile.mkstemp(prefix=".lace-converting-", suffix=f".{settings.output_format}", dir=output_dir)
             os.close(fd)
-            cmd = build_command(self.ffmpeg, source, temp_path, kind, settings)
+            cmd = build_command(self.ffmpeg, source, temp_path, kind, settings, channels)
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
                                        errors="replace", **process_options())

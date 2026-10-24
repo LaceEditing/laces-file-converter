@@ -4,7 +4,7 @@ from pathlib import Path
 import tarfile
 
 root = Path(__file__).resolve().parents[1]
-output = root / "dist/laces-file-converter-4.1.2-linux.tar.gz"
+output = root / "dist/laces-file-converter-4.2.0-linux.tar.gz"
 output.parent.mkdir(exist_ok=True)
 files = ["main.py", "converter.py", "linux_support.py", "ui_components.py", "requirements.txt", "install-linux.sh",
          "laces-file-converter.sh", "README.md", "LICENSE",

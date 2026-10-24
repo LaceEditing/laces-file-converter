@@ -14,7 +14,7 @@ def main():
     subprocess.run([sys.executable, str(REPO / "scripts/build_linux.py")], check=True)
     with tempfile.TemporaryDirectory(prefix="lace-install-") as folder:
         temp = Path(folder)
-        with tarfile.open(REPO / "dist/laces-file-converter-4.1.2-linux.tar.gz") as archive:
+        with tarfile.open(REPO / "dist/laces-file-converter-4.2.0-linux.tar.gz") as archive:
             archive.extractall(temp, filter="data")
         source = temp / "laces-file-converter"
         prefix = temp / "prefix with spaces % ü"
@@ -30,7 +30,7 @@ def main():
         assert current.resolve() != previous
         assert previous.exists()
         version = subprocess.check_output([str(launcher), "--version"], text=True, cwd="/")
-        assert "4.1.2" in version
+        assert "4.2.0" in version
         # Failed dependency installation must preserve the working release.
         active = current.resolve()
         environment = dict(os.environ, PIP_NO_INDEX="1", PIP_FIND_LINKS=str(temp / "empty-wheels"))

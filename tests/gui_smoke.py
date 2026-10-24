@@ -1,4 +1,4 @@
-"""Exercise the actual Tk event loop and worker on an X11/XWayland display."""
+"""Exercise the actual Tk event loop and worker on a desktop session (Windows, X11 or XWayland)."""
 
 import os
 from pathlib import Path

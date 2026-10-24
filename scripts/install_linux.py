@@ -81,7 +81,7 @@ def main() -> int:
     versions = root / "versions"
     versions.mkdir(exist_ok=True)
     # Build at its permanent path: moving a virtualenv breaks entry-point shebangs.
-    release = Path(tempfile.mkdtemp(prefix="4.1.2-", dir=versions))
+    release = Path(tempfile.mkdtemp(prefix="4.2.0-", dir=versions))
     activated = False
     try:
         print("Creating an isolated Python environment…", flush=True)

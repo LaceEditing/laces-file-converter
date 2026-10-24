@@ -11,7 +11,34 @@ from converter import find_binary
 def config_path() -> Path:
     if sys.platform == "linux":
         return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "laces-file-converter" / "config.json"
+    if sys.platform == "win32" and os.environ.get("APPDATA"):
+        return Path(os.environ["APPDATA"]) / "laces-file-converter" / "config.json"
     return Path.home() / ".lace_converter_config.json"
+
+
+def binary_folders(base_path: str) -> list[str]:
+    """A frozen app also checks beside its executable, where users place FFmpeg."""
+    folders = [base_path]
+    if getattr(sys, "frozen", False):
+        folders.append(str(Path(sys.executable).parent))
+    return folders
+
+
+def locate_binary(name: str, base_path: str) -> str | None:
+    for folder in binary_folders(base_path):
+        binary = find_binary(name, folder)
+        if binary:
+            return binary
+    return None
+
+
+def ffmpeg_install_hint() -> str:
+    if sys.platform == "win32":
+        return ("Windows: run  winget install Gyan.FFmpeg  then restart the app,\n"
+                "or place ffmpeg.exe and ffprobe.exe next to the app.")
+    if sys.platform == "darwin":
+        return "macOS: brew install ffmpeg"
+    return dependency_hint()
 
 
 def dependency_hint() -> str:
@@ -41,7 +68,7 @@ def check_environment() -> int:
             print(f"{module}: {'MISSING' if required else 'optional, unavailable'} — {exc}")
             failed |= required
     for name in ("ffmpeg", "ffprobe"):
-        binary = find_binary(name, str(Path(__file__).parent))
+        binary = locate_binary(name, str(Path(__file__).parent))
         print(f"{name}: {binary or 'MISSING'}")
         failed |= binary is None
     if sys.platform == "linux":

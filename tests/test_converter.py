@@ -51,6 +51,20 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(fast[fast.index("-crf") + 1], slow[slow.index("-crf") + 1])
         self.assertEqual(fast[fast.index("-preset") + 1], "veryfast")
 
+    def test_channel_options(self):
+        def command(channels, source_channels=None, ext="mp3", kind="audio", **kwargs):
+            return build_command("ffmpeg", "a", "b", kind, Settings(ext, audio_channels=channels, **kwargs), source_channels)
+        self.assertEqual(command("Mono", 2)[-4:-2], ["-ac", "1"])
+        self.assertIn("pan=stereo|c0=c0|c1=c0", command("Stereo", 1))
+        self.assertNotIn("-ac", command("Stereo", 1))
+        self.assertEqual(command("Stereo", 2)[-4:-2], ["-ac", "2"])
+        self.assertEqual(command("Stereo", None)[-4:-2], ["-ac", "2"])
+        self.assertIn("-ac", command("Mono", 2, ext="mp4", kind="video"))
+        for cmd in (command("Original", 1), command("Mono", 2, copy_streams=True),
+                    command("Stereo", 1, ext="mkv", kind="video", copy_streams=True)):
+            self.assertNotIn("-ac", cmd)
+            self.assertNotIn("-af", cmd)
+
 
 class ProcessTests(unittest.TestCase):
     def setUp(self):
@@ -59,11 +73,17 @@ class ProcessTests(unittest.TestCase):
         self.folder = Path(self.temp.name)
         self.source = self.folder / "source with spaces ü.mp4"
         self.source.write_bytes(b"original")
+        # Shebang scripts are not executable on Windows; run fake tools with this interpreter.
+        real_popen = subprocess.Popen
+        def popen(cmd, **kwargs):
+            return real_popen([sys.executable, *cmd] if cmd[0].endswith(".py") else cmd, **kwargs)
+        patcher = patch("converter.subprocess.Popen", side_effect=popen)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def fake_program(self, body):
-        script = self.folder / "fake-ffmpeg"
-        script.write_text(f"#!{sys.executable}\nimport sys, time, pathlib, signal\n" + body)
-        script.chmod(0o755)
+    def fake_program(self, body, name="fake-ffmpeg.py"):
+        script = self.folder / name
+        script.write_text("import sys, time, pathlib, signal\n" + body, encoding="utf-8")
         return str(script)
 
     def convert(self, binary, cancel=None, report=None, probe=None):
@@ -97,8 +117,6 @@ sys.exit(1)
         self.assertEqual(self.source.read_bytes(), b"original")
 
     def test_cancel_silent_child_that_ignores_terminate(self):
-        if sys.platform == "win32":
-            self.skipTest("POSIX signal behavior")
         binary = self.fake_program('''
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 pathlib.Path(sys.argv[-1]).write_bytes(b"partial")
@@ -141,10 +159,8 @@ pathlib.Path(sys.argv[-1]).write_bytes(b"output")
 
     def test_bad_probe_falls_back_to_unknown_duration(self):
         binary = self.fake_program('pathlib.Path(sys.argv[-1]).write_bytes(b"new")\n')
-        probe = self.folder / "probe"
-        probe.write_text(f'#!{sys.executable}\nprint(\'{{"format": {{"duration": "NaN"}}}}\')\n')
-        probe.chmod(0o755)
-        self.assertIsNotNone(self.convert(binary, probe=str(probe)).output)
+        probe = self.fake_program('print(\'{"format": {"duration": "NaN"}}\')\n', "fake-probe.py")
+        self.assertIsNotNone(self.convert(binary, probe=probe).output)
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg and ffprobe required")
@@ -162,6 +178,9 @@ class FFmpegIntegrationTests(unittest.TestCase):
                                "-t", "1.2", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(cls.video)], check=True)
         subprocess.run(base + ["-i", str(cls.video), "-vn", str(cls.audio)], check=True)
         subprocess.run(base + ["-i", str(cls.video), "-frames:v", "1", str(cls.image)], check=True)
+        cls.stereo = cls.folder / "stereo.wav"
+        subprocess.run(base + ["-f", "lavfi", "-i", "aevalsrc=0.5*sin(440*2*PI*t)|0.25*sin(660*2*PI*t):d=1",
+                               str(cls.stereo)], check=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -172,6 +191,7 @@ class FFmpegIntegrationTests(unittest.TestCase):
         result = self.engine.convert(str(source), str(self.folder), kind, Settings(ext, **kwargs), threading.Event(), events.append)
         self.assertIsNone(result.error, f"{ext}: {result.error}")
         self.assertTrue(Path(result.output).stat().st_size > 0)
+        self.last_output = result.output
         self.assertEqual(events[-1].fraction, 1)
         probe = subprocess.check_output([self.engine.ffprobe, "-v", "error", "-show_streams", "-of", "json", result.output], text=True)
         streams = json.loads(probe)["streams"]
@@ -194,6 +214,27 @@ class FFmpegIntegrationTests(unittest.TestCase):
                 self.run_conversion(self.audio, "audio", ext)
         streams = self.run_conversion(self.video, "video", "mp3")
         self.assertEqual([s["codec_type"] for s in streams], ["audio"])
+
+    def peak_levels(self, path):
+        stats = subprocess.run([self.engine.ffmpeg, "-hide_banner", "-i", str(path), "-af",
+                                "astats=measure_overall=none:measure_perchannel=Peak_level", "-f", "null", "-"],
+                               capture_output=True, text=True, check=True).stderr
+        return [float(line.rsplit(":", 1)[1]) for line in stats.splitlines() if "Peak level dB" in line]
+
+    def test_channel_conversion(self):
+        source_peak = self.peak_levels(self.audio)
+        self.assertEqual(len(source_peak), 1)
+        streams = self.run_conversion(self.audio, "audio", "wav", audio_channels="Stereo")
+        self.assertEqual(streams[0]["channels"], 2)
+        left, right = self.peak_levels(self.last_output)
+        # Mono becomes identical left/right copies at the original level, not a -3 dB upmix.
+        self.assertAlmostEqual(left, right, places=3)
+        self.assertAlmostEqual(left, source_peak[0], places=1)
+        self.assertEqual(self.run_conversion(self.audio, "audio", "mp3", audio_channels="Stereo")[0]["channels"], 2)
+        self.assertEqual(self.run_conversion(self.stereo, "audio", "flac", audio_channels="Mono")[0]["channels"], 1)
+        self.assertEqual(self.run_conversion(self.stereo, "audio", "opus", audio_channels="Original")[0]["channels"], 2)
+        streams = self.run_conversion(self.video, "video", "mp4", audio_channels="Stereo")
+        self.assertEqual([s["channels"] for s in streams if s["codec_type"] == "audio"], [2])
 
     def test_image_formats(self):
         for ext in ("jpg", "png", "webp", "bmp", "gif", "tiff", "ico", "avif"):

@@ -20,9 +20,9 @@ import time
 from pathlib import Path
 
 from converter import Converter, Progress, Settings, find_binary, format_time
-from linux_support import check_environment, config_path
+from linux_support import check_environment, config_path, ffmpeg_install_hint, locate_binary
 
-VERSION = "4.1.2"
+VERSION = "4.2.0"
 if __name__ == "__main__" and "--check" in sys.argv:
     sys.exit(check_environment())
 if __name__ == "__main__" and "--version" in sys.argv:
@@ -120,7 +120,7 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
                 print(f"Drag-and-drop unavailable; use Browse for Files: {exc}", file=sys.stderr)
 
         self.title(f"Lace's Total File Converter · v{self.CURRENT_VERSION}")
-        self.geometry("920x800")
+        self.geometry("920x840")
         self.minsize(760, 620)
 
         self.set_icon()
@@ -140,6 +140,7 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
         self.encoding_speed = ctk.StringVar(value="Fast")
         self.conversion_mode = ctk.StringVar(value="Convert")
         self.audio_bitrate = ctk.StringVar(value="320 kbps")
+        self.audio_channels = ctk.StringVar(value="Original")
         self.image_quality = ctk.StringVar(value="95")
         self.video_output_format = ctk.StringVar(value="mp4")
         self.audio_output_format = ctk.StringVar(value="mp3")
@@ -256,8 +257,8 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
 
         Checks environment overrides, native bundled binaries, and system PATH.
         """
-        self.ffmpeg_binary = find_binary("ffmpeg", self._base_path())
-        self.ffprobe_binary = find_binary("ffprobe", self._base_path())
+        self.ffmpeg_binary = locate_binary("ffmpeg", self._base_path())
+        self.ffprobe_binary = locate_binary("ffprobe", self._base_path())
         if not self.ffprobe_binary and self.ffmpeg_binary:
             self.ffprobe_binary = find_binary("ffprobe", str(Path(self.ffmpeg_binary).parent))
         return self.ffmpeg_binary is not None
@@ -265,9 +266,7 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
     def show_ffmpeg_warning(self) -> None:
         messagebox.showerror("FFmpeg Required", (
             "FFmpeg was not found. Install FFmpeg and ffprobe, then restart the app.\n\n"
-            "Garuda / Arch: sudo pacman -S --needed ffmpeg\n"
-            "Ubuntu / Debian: sudo apt install ffmpeg\n\n"
-            "Windows: place ffmpeg.exe and ffprobe.exe next to main.py.\n"
+            f"{ffmpeg_install_hint()}\n\n"
             "Run the launcher with --check for dependency diagnostics."
         ))
 
@@ -357,6 +356,12 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
             self.image_quality_menu.grid(row=0, column=1, padx=(0, 20), pady=4, sticky="ew")
             self.format_label.configure(text="Output Format:")
             self.image_format_menu.grid(row=1, column=1, padx=(0, 20), pady=4, sticky="ew")
+        if file_type == "image":
+            self.channels_label.grid_forget()
+            self.channels_menu.grid_forget()
+        else:
+            self.channels_label.grid(row=2, column=0, padx=(0, 12), sticky="e")
+            self.channels_menu.grid(row=2, column=1, padx=(0, 20), pady=4, sticky="ew")
         self._update_mode_options()
 
     def _update_mode_options(self, _choice=None) -> None:
@@ -365,10 +370,11 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
         self.mode_menu.configure(state="disabled" if kind == "image" else "normal")
         speed_applies = kind == "video" and self.video_output_format.get() in {"mp4", "mkv", "mov", "m4v", "ts", "webm"}
         self.speed_menu.configure(state="normal" if speed_applies and not copy else "disabled")
-        for widget in (self.video_quality_menu, self.audio_bitrate_menu):
+        for widget in (self.video_quality_menu, self.audio_bitrate_menu, self.channels_menu):
             widget.configure(state="disabled" if copy else "normal")
         if copy:
-            text = "Copy streams skips encoding and preserves quality. The output container must support the source codecs."
+            text = ("Copy streams skips encoding and preserves quality. The output container must support the source codecs. "
+                    "Quality, bitrate and channel changes need Convert.")
         elif kind == "image":
             text = "Image quality applies when supported by the selected format."
         elif speed_applies:
@@ -464,6 +470,9 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
         self.mode_menu = ctk.CTkOptionMenu(opts_grid, values=["Convert", "Copy streams"],
                                           variable=self.conversion_mode, command=self._update_mode_options, **menu_kw)
         self.mode_menu.grid(row=1, column=3, pady=4, sticky="ew")
+        self.channels_label = ctk.CTkLabel(opts_grid, text="Channels:", font=self._small_font, text_color=C['text'])
+        self.channels_menu = ctk.CTkOptionMenu(opts_grid, values=["Original", "Stereo", "Mono"],
+                                              variable=self.audio_channels, **menu_kw)
         self.encoding_hint = ctk.CTkLabel(self.options_frame, text="", font=self._small_font, width=1,
                                          text_color=C['text_dim'], wraplength=800, justify="center", anchor="center")
         self.encoding_hint.pack(fill="x", padx=16, pady=(0, 12))
@@ -664,7 +673,8 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
         for widget in (self.browse_input_btn, self.clear_btn, self.browse_output_btn,
                        self.output_entry, self.recent_dropdown, self.video_quality_menu,
                        self.audio_bitrate_menu, self.image_quality_menu, self.video_format_menu,
-                       self.audio_format_menu, self.image_format_menu, self.speed_menu, self.mode_menu):
+                       self.audio_format_menu, self.image_format_menu, self.speed_menu, self.mode_menu,
+                       self.channels_menu):
             widget.configure(state="disabled" if busy else "normal")
         if not busy:
             self._update_mode_options()
@@ -778,7 +788,8 @@ class FileConverterApp(ctk.CTk, tkdnd.TkinterDnD.DnDWrapper if tkdnd else object
             return
         settings = Settings(ext, self.video_quality.get(), self.encoding_speed.get(),
                             self.audio_bitrate.get().split()[0], int(self.image_quality.get().split()[0]),
-                            self.conversion_mode.get() == "Copy streams" and self.current_file_type != "image")
+                            self.conversion_mode.get() == "Copy streams" and self.current_file_type != "image",
+                            self.audio_channels.get())
         self.cancel_event.clear()
         self.is_converting = True
         self.batch_started = time.monotonic()

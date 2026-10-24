@@ -25,6 +25,7 @@
 - **Video → Audio extraction**, pull the audio track out of any video file
 - **Live conversion details**, current-file percentage, batch progress, elapsed time, estimated file time remaining, encoding speed, FPS, and output size
 - **Independent speed and quality**, fast encoding by default, with balanced and smaller-file settings
+- **Stereo / mono output**, convert audio (including a video's soundtrack) to stereo or mono; mono files become true stereo with identical left and right channels
 - **Copy streams mode**, change compatible video/audio containers without re-encoding
 - **Cancel mid-conversion**, stop a running batch at any time without leaving ghost processes
 - **Wide format support**, 40+ input/output formats across video, audio, and image (see [Supported Formats](#supported-formats))
@@ -34,7 +35,7 @@
 - **Always-visible progress**, conversion status and Cancel stay on screen when setup needs scrolling
 - **Notification sound**, plays a chime when your conversion finishes
 - **Native Linux installation**, isolated Python environment, application-menu entry, file-manager integration, upgrades, and uninstall
-- **Cross-platform**, Python interface for Linux, Windows, and macOS; FFmpeg is installed separately
+- **Cross-platform**, Python interface for Linux, Windows, and macOS, plus a single-file Windows `.exe` build; FFmpeg is installed separately or bundled into the `.exe`
 
 ---
 
@@ -81,7 +82,13 @@ For other distributions, install Python, Python's venv/ensurepip support, Tk bin
 
 ### Windows / macOS / running from source
 
-Install Python 3.10+ with Tk, then:
+Install Python 3.10+ with Tk (the python.org and Windows Store builds include it). On Windows, install FFmpeg with:
+
+```powershell
+winget install Gyan.FFmpeg
+```
+
+Then, from the project folder:
 
 ```bash
 python -m venv .venv
@@ -94,7 +101,7 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-FFmpeg **and ffprobe** must be on `PATH`, or placed next to `main.py` (Windows: `ffmpeg.exe` and `ffprobe.exe`). You can also set `FFMPEG_BINARY` and `FFPROBE_BINARY` to their full paths. On macOS, install FFmpeg with `brew install ffmpeg` and use a Python build with Tk. If ffprobe is unavailable at runtime, conversion still works with an activity indicator and elapsed time instead of percentage/ETA.
+FFmpeg **and ffprobe** must be on `PATH`, or placed next to `main.py` or the built `.exe` (Windows: `ffmpeg.exe` and `ffprobe.exe`). Windows settings are stored in `%APPDATA%\laces-file-converter\config.json`. You can also set `FFMPEG_BINARY` and `FFPROBE_BINARY` to their full paths. On macOS, install FFmpeg with `brew install ffmpeg` and use a Python build with Tk. If ffprobe is unavailable at runtime, conversion still works with an activity indicator and elapsed time instead of percentage/ETA.
 
 ---
 
@@ -111,6 +118,7 @@ Click **Browse for Files** or **drag-and-drop** files anywhere on the applicatio
 - **Video:** choose quality (High / Medium / Low), encoding speed, and an output container. **Fast** is the default. Balanced / Smaller files spend more encoding time on compression. Speed applies to H.264 and WebM outputs; other codecs use their own settings. Pick an audio format to **extract audio only**, with a selectable bitrate.
 - **Copy streams:** for video/audio, choose this mode when you only need a compatible container change. It preserves compressed streams and skips encoding. Quality/bitrate controls are disabled. All video/audio tracks are kept for video outputs; audio extraction keeps the first audio track. Subtitles, attachments, and data tracks are not copied. Incompatible codec/container pairs fail with an explanation; choose **Convert** to re-encode them.
 - **Audio:** choose a bitrate and output format.
+- **Channels (audio and video):** **Original** keeps the source layout. **Stereo** turns a mono file into two identical channels at the original volume, and folds surround sound down to stereo. **Mono** mixes all channels into one. Channel changes need re-encoding, so this setting is disabled in **Copy streams** mode.
 - **Image:** choose a quality level and output format (including `.ico` and `.avif`).
 
 ### 3. Choose Output Folder
@@ -169,7 +177,8 @@ laces-file-converter/
 ├── install-linux.sh         # Native Linux installer entry point
 ├── scripts/
 │   ├── install_linux.py     # User install, upgrades, desktop entry, uninstall
-│   └── build_linux.py       # Build the distributable Linux installer archive
+│   ├── build_linux.py       # Build the distributable Linux installer archive
+│   └── build_windows.py     # Build the single-file Windows executable
 ├── tests/                   # Process, progress, real FFmpeg, and GUI smoke checks
 ├── requirements.txt
 └── assets/                  # Fonts, icon, notification sound
@@ -185,35 +194,32 @@ laces-file-converter/
 python3 scripts/build_linux.py
 ```
 
-This creates `dist/laces-file-converter-4.1.2-linux.tar.gz`, including the installer and application assets. Python dependencies are downloaded during installation; this is not an offline bundle.
+This creates `dist/laces-file-converter-4.2.0-linux.tar.gz`, including the installer and application assets. Python dependencies are downloaded during installation; this is not an offline bundle.
 
 ### Tests
 
 ```bash
 python3 -m unittest discover -s tests -v
-# With GUI dependencies installed and an X11/XWayland display:
+# With GUI dependencies installed and a desktop session (Windows, X11, or XWayland):
 .venv/bin/python tests/gui_smoke.py
 .venv/bin/python tests/gui_layout.py
 ```
 
+On Windows, use `python` and `.venv\Scripts\python` in place of `python3` and `.venv/bin/python`.
+
 The integration tests generate synthetic media, convert all advertised output formats, probe and decode the results, and verify stream copying. Other tests cover stderr pipe saturation, silent/hung child cancellation, probe cancellation, unknown duration, invalid progress, failure cleanup, and filename collisions. No personal media is used.
 
 
-### PyInstaller (single `.exe`)
+### Windows single-file `.exe`
 
-```bash
-pip install pyinstaller
+From an activated virtual environment with the requirements installed:
 
-pyinstaller --onefile --windowed \
-    --add-data "assets;assets" \
-    --add-binary "ffmpeg.exe;." \
-    --add-binary "ffprobe.exe;." \
-    --icon "assets/icons/icon2.ico" \
-    --name "LacesFileConverter" \
-    main.py
+```powershell
+python -m pip install pyinstaller
+python scripts\build_windows.py
 ```
 
-The resulting executable will be in the `dist/` folder.
+This creates `dist\LacesFileConverter.exe` with the assets, CustomTkinter themes, and drag-and-drop library included. If `ffmpeg.exe` and `ffprobe.exe` sit next to `main.py` (or you pass `--ffmpeg-dir <folder>`), they are bundled too. Otherwise the executable uses FFmpeg from `PATH` or from the folder containing the `.exe`.
 
 ---
 

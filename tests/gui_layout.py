@@ -40,7 +40,7 @@ try:
         ctk.set_widget_scaling(scale)
         ctk.set_window_scaling(scale)
         app._set_scaled_min_max()
-        app.geometry("920x800")
+        app.geometry("920x840")
         settle(app)
         assert not app.main_frame.scrollbar_visible, f"Unnecessary scrollbar at {scale}x"
         assert not app.main_frame._scrollbar.winfo_ismapped()
@@ -55,7 +55,7 @@ try:
         app.main_frame.event_generate("<Button-5>")
         settle(app)
         assert canvas.yview()[0] > before, "Linux wheel did not scroll overflowing content"
-        app.geometry("920x800")
+        app.geometry("920x840")
         settle(app)
         assert not app.main_frame.scrollbar_visible, "Scrollbar did not disappear after enlarging"
         assert not app.main_frame._scrollbar.winfo_ismapped()
@@ -68,7 +68,7 @@ try:
         ctk.set_widget_scaling(app.display_scale)
         ctk.set_window_scaling(app.display_scale)
         app._set_scaled_min_max()
-        app.geometry("920x800")
+        app.geometry("920x840")
         settle(app)
         assert not app.main_frame._scrollbar.winfo_ismapped()
         subprocess.run(["import", "-window", str(app.winfo_id()), os.environ["LACE_GUI_SCREENSHOT"]], check=True)
